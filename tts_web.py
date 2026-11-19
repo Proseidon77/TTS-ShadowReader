@@ -543,7 +543,11 @@ async def _in_thread(fn, *args):
 
 
 async def handle_share(request):
-    """POST /share {text, lang?, rate?, title?, by?} -> {"id", "url"}（响应与现行一致）。
+    """POST /share {text, lang?, rate?, title?, by?, added_via?} -> {"id", "url", ...}（原有两字段不变，其余为加性字段）。
+
+    第二期（DF-2，§5 契约）：added_via=agent|web，只认带写令牌的调用（缺省按令牌推断为 agent）；不带令牌的旧调用
+    一律记 legacy。网页通道由 agnes-service 用自己的服务令牌代调（by=web、added_via=web，令牌 can_act_for 含 web），
+    本服务不为网页通道另写任何逻辑（PHASE2-AUTH-DESIGN）。
 
     内部：「只交原文」commit——规范化→分句→骨架→按 content_hash 去重（命中返回已有 ID）→status=partial。
     令牌：grace_until 之前可不带（日志记 no-token，by 原样写 added_by 但标未验证）；之后必须带写令牌。
@@ -574,6 +578,14 @@ async def handle_share(request):
     rate = params.get("rate") or "-20%"
     if not RATE_RE.match(rate):
         return web.json_response({"error": "rate 需如 -20%"}, status=400)
+    try:
+        via = _ingest.check_added_via(params)
+    except _ingest.ApiError as exc:
+        return web.json_response({"error": exc.message}, status=exc.status)
+    if who is None:
+        via = "legacy"            # 不带令牌（宽限期内的旧调用）：通道不可信，一律 legacy
+    elif via is None:
+        via = "agent"
     by = (params.get("by") or "").strip()[:40] or None
     if who is not None:
         try:
@@ -582,7 +594,7 @@ async def handle_share(request):
             return web.json_response({"error": exc.message}, status=exc.status)
     meta = {"lang": (params.get("lang") or "ja").lower(), "rate": rate,
             "title": ((params.get("title") or "").strip()[:120] or None), "added_by": by,
-            "caller": who[0] if who else None}
+            "added_via": via, "caller": who[0] if who else None}
     try:
         plan = await _in_thread(_ingest.plan_share, text)
         sid = await _in_thread(STORE.share, plan, meta)
@@ -594,13 +606,18 @@ async def handle_share(request):
         if meta["title"]:
             item["title"] = meta["title"]
         await _in_thread(STORE.sqlite_put, sid, item)
-    return web.json_response({"id": sid, "url": f"/?s={sid}"})
+    resp = {"id": sid, "url": f"/?s={sid}", "v3_url": f"/v3?s={sid}"}
+    if meta.get("_duplicate"):
+        resp["duplicate"] = meta["_duplicate"]
+    if who is not None:
+        log.info("share sid=%s caller=%s added_by=%s via=%s dup=%s", sid, meta["caller"], by, via, bool(meta.get("_duplicate")))
+    return web.json_response(resp)
 
 
 async def handle_get_share(request):
     sid = request.match_info["sid"]
     try:
-        item = await _in_thread(STORE.get_legacy, sid)
+        item = await _in_thread(STORE.get_legacy_public, sid)
     except _PgUnavailable as exc:
         log.warning("get_share fallback to sqlite sid=%s: %s", sid, exc)
         item = await _in_thread(STORE.sqlite_get, sid)
@@ -665,9 +682,16 @@ async def handle_api_commit(request, who):
     plan = await _in_thread(_ingest.plan_commit, body)
     result = await _in_thread(STORE.commit, plan, added_by, who[0])
     result["warnings"] = plan["warnings"]
-    log.info("commit caller=%s added_by=%s share_id=%s dup=%s v=%s status=%s",
-             who[0], added_by, result["share_id"], result["duplicate"], result["version"], result["status"])
+    log.info("commit caller=%s added_by=%s via=%s share_id=%s dup=%s v=%s status=%s",
+             who[0], added_by, plan.get("added_via"), result["share_id"], result["duplicate"], result["version"], result["status"])
     return web.json_response(result)
+
+
+@_api("read")
+async def handle_api_readings_check(request, who):
+    """第二期 §5：词典佐证（read 权限）。agnes-service 的 fixes 核对层第 2 层；不可用时对方退回本地分流。"""
+    body = await _api_body(request)
+    return web.json_response(await _in_thread(_ingest.readings_check, body))
 
 
 @_api("read")
@@ -694,6 +718,17 @@ async def handle_v3(_request):
             page = fh.read()
     except OSError:
         return web.Response(status=404, text="player_v3.html missing")
+    return web.Response(text=page, content_type="text/html", charset="utf-8",
+                        headers={"Cache-Control": "no-store"})
+
+
+async def handle_v4(_request):
+    """播放页 v4（v3 的视觉重设计，2026-11-20）：/v4 读取 player_v4.html，与 v3、默认页 v2 并行试看。"""
+    try:
+        with open(os.path.join(_BASE_DIR, "player_v4.html"), encoding="utf-8") as fh:
+            page = fh.read()
+    except OSError:
+        return web.Response(status=404, text="player_v4.html missing")
     return web.Response(text=page, content_type="text/html", charset="utf-8",
                         headers={"Cache-Control": "no-store"})
 
@@ -775,8 +810,8 @@ async def handle_health(_request):
 
 
 async def handle_index(_request):
-    # 2026-11-15 起「日语朗读页」(player_v2.html) 转正为默认页；旧版 player.html 留盘备份。
-    html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "player_v2.html")
+    # 2026-11-20 起 v4（player_v4.html，Animal Island 主题，两轮走查改版后定版）转正为默认页；v2（2026-11-15 转正）与 v3 仍可经 /v2、/v3 访问。
+    html_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "player_v4.html")
     try:
         with open(html_path, encoding="utf-8") as fh:
             page = fh.read()
@@ -806,11 +841,13 @@ def make_app():
     app.router.add_post("/api/v1/ingest/commit", handle_api_commit)
     app.router.add_get("/api/v1/articles", handle_api_articles)
     app.router.add_get("/api/v1/articles/{sid}", handle_api_article)
+    app.router.add_post("/api/v1/ingest/readings_check", handle_api_readings_check)
     app.router.add_get("/ingest.md", _md_handler("ingest.md"))
     app.router.add_get("/ingest_prompt.md", _md_handler("ingest_prompt.md"))
     app.router.add_get("/v3", handle_v3)
     app.router.add_get("/v3/t/{sid}", handle_v3_share)
     app.router.add_get("/v3/articles", handle_v3_articles)
+    app.router.add_get("/v4", handle_v4)
     app.router.add_get("/vue.global.prod.js", handle_vue_js)
     return app
 

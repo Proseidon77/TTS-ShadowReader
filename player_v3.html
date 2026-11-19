@@ -67,6 +67,11 @@
          （2026-11-19 布局调整：假名/译开关挪到应用标题行右侧、紧凑样式，焦点序随之排到最前，先于选文）
          （navEls() 每次按当前 DOM 取，隐藏者由 isShown 过滤）。打开面板 → 焦点到“当前篇”或第一篇；
          关闭 → 焦点回「选文」；选中 → 焦点回播放键。
+         （2026-11-20 修正：上述回焦只对遥控/键盘成立；触摸/鼠标点按后不回焦并 blur，
+          免得焦点环留在「选文」键上像一直被选中——lastPointerNav 标记区分两种交互。）
+         （2026-11-20 再修正：「✎ 编辑文本」按钮与编辑视图整体下线——保存文章已走 8793 的 /add、
+          播放页回归纯播放。textarea 仅作内核的文本载体保留在 DOM 里、恒 hidden，
+          焦点序与 NAV 同步去掉编辑键与编辑框，全文区的「确定键编辑文本」入口一并取消。）
    裸 /v3：页头显示「未选文章」，面板自动展开、焦点落在第一篇（一按确定即开读）；默认文本仍在编辑框里，
          关闭面板即可照 v2 方式朗读。
    切换时重置：当前句、逐句揭示表、滚动位置、富数据/简易模式标记；保留：假名/译开关（全局偏好）、
@@ -447,7 +452,7 @@
         <div class="tr card-tr" v-if="!simple && card.tr && trMode !== 'hide'"
              :class="{ blur: trMode === 'blur' && !revealed[cardIdx] }" @click="reveal(cardIdx)">{{ card.tr }}</div>
       </div>
-      <div id="reader" class="reader" tabindex="0" role="region" aria-label="全文跟读（点句跳转；按确定键编辑文本）"
+      <div id="reader" class="reader" tabindex="0" role="region" aria-label="全文跟读（点句跳转）"
            v-show="readingView && lines.length && !pickOpen" :style="fit.listH ? { height: fit.listH + 'px', minHeight: '0px' } : null">
         <div v-for="(ln, i) in lines" :key="i" class="line"
              :class="{ done: i < idx, cur: i === idx, gap: ln.gap }" :aria-current="i === idx ? 'true' : null"
@@ -459,7 +464,7 @@
       </div>
       </div><!-- /.duo -->
     </div>
-<textarea id="text" aria-label="朗读文本" spellcheck="false">大丈夫ですか？
+<textarea id="text" aria-label="朗读文本" spellcheck="false" hidden>大丈夫ですか？
 水…
 起きれますか？
 スポーツ飲料も買ってきました。常温です。
@@ -499,13 +504,12 @@
           <option value="-40%">60%</option>
         </select>
       </label>
-      <button id="edit" class="ghost" type="button" hidden>✎ 编辑文本</button>
     </div>
   </div>
 
   <audio id="player" controls preload="none" tabindex="0"></audio>
   <p class="note">音频由微软 Edge TTS 实时合成，切成小段（HLS 流）边合成边播。点全文里任意一句可跳到该句（按估算定位）。<br>
-  遥控器：方向键移动焦点，确定键操作；在文本框里按返回键（或 Esc）回到播放按钮。</p>
+  遥控器：方向键移动焦点，确定键操作。</p>
 </main>
 
 <script src="/vue.global.prod.js"></script>
@@ -796,12 +800,19 @@
   var textEl = $('text');
   var langEl = $('lang');
   var rateEl = $('rate');
-  var editBtn = $('edit');
   var reader = $('reader');          // Vue 挂载后取（v-show，元素常驻）
   var kanaBtn = $('kanaBtn');
   var trBtn = $('trBtn');
   var pickBtn = $('pickBtn');        // P4b 选文入口（Vue 挂载后取，元素常驻）
   var pickClose = $('pickClose');
+  // 最近一次交互方式（2026-11-20 修正）：触摸/鼠标点按后程序化回焦会把焦点环留在按钮上，
+  // 手机上看上去像「选文一直被选中」；遥控/键盘操作则必须回焦。故 pointer 系事件置位、keydown 清除，
+  // 回焦类动作（开面板聚焦、关面板回焦、选中后聚焦播放键）在 lastPointerNav 时跳过并顺手 blur。
+  var lastPointerNav = false;
+  ['pointerdown', 'mousedown', 'touchstart'].forEach(function (ev) {
+    window.addEventListener(ev, function () { lastPointerNav = true; }, { passive: true, capture: true });
+  });
+  window.addEventListener('keydown', function () { lastPointerNav = false; }, true);
   var statusEl = $('status');
 
   // ---------------- 同步参数（同 v2；kcps 为富模式按 kana 计数时的每秒拍数） ----------------
@@ -1048,15 +1059,8 @@
     renderStatus(null);
   }
 
-  function showEditor(focusText) {
-    var hadFocus = document.activeElement === reader;
-    readingView = false;
-    V.readingView = false;
-    textEl.hidden = false;
-    if (focusText || hadFocus) textEl.focus();
-    renderStatus(null);
-    refreshUI();
-  }
+  // 编辑视图已于 2026-11-20 整体下线（见页首 P4b 节注）：textarea 仅作内核文本载体、恒 hidden，
+  // 不再有任何入口能把它显示出来；showReader 是唯一的视图切换。
 
   // ---------------- 播放按钮（同 v2） ----------------
   function sessionMatches() {
@@ -1081,10 +1085,6 @@
       else if (audio.currentTime > 0) setBtn('▶︎', '继续');
       else setBtn('▶︎', '播放');
     }
-    var showEdit = readingView || sessionMatches() || (!S && V.lines.length > 0);
-    if (!showEdit && document.activeElement === editBtn) btn.focus();
-    editBtn.hidden = !showEdit;
-    editBtn.textContent = readingView ? '✎ 编辑文本' : '☰ 返回跟读';
   }
 
   var hlsObj = null, hlsLibPromise = null;
@@ -1183,10 +1183,6 @@
   }
 
   btn.addEventListener('click', onPlayActivate);
-  editBtn.addEventListener('click', function () {
-    if (readingView) showEditor(true);
-    else if (sessionMatches() || (!S && V.lines.length)) showReader();
-  });
   textEl.addEventListener('input', refreshUI);
   langEl.addEventListener('change', refreshUI);
   rateEl.addEventListener('change', refreshUI);
@@ -1233,7 +1229,7 @@
   }, 1000);
 
   // ---------------- 遥控器 / 方向键空间导航（NAV 扩充两个开关） ----------------
-  var NAV = [kanaBtn, trBtn, pickBtn, pickClose, btn, langEl, rateEl, editBtn, textEl, reader, audio];
+  var NAV = [kanaBtn, trBtn, pickBtn, pickClose, btn, langEl, rateEl, reader, audio];
   // P4b：选文列表项是动态生成的，空间导航时把当前可见的 .pick-item 一并纳入（不可见者由 isShown 过滤）
   function navEls() {
     var els = NAV.concat(Array.prototype.slice.call(document.querySelectorAll('.pick-item')));
@@ -1335,7 +1331,7 @@
     }
 
     if (isEnter || isSpace) {
-      if (t === btn || t === editBtn || t === kanaBtn || t === trBtn ||
+      if (t === btn || t === kanaBtn || t === trBtn ||
           t === pickBtn || t === pickClose || (t && t.classList && t.classList.contains('pick-item'))) {
         if (isEnter) { e.preventDefault(); if (!e.repeat) t.click(); }
         return;
@@ -1343,7 +1339,6 @@
       if (e.repeat) { e.preventDefault(); return; }
       if (t === langEl || t === rateEl) { e.preventDefault(); openSelect(t); return; }
       if (t === audio) { e.preventDefault(); toggleAudio(); return; }
-      if (t === reader) { e.preventDefault(); showEditor(true); return; }
       if (V.split && t && t.classList && t.classList.contains('card')) {   // P4d：横屏朗读卡——确定键揭开模糊译文
         e.preventDefault();
         if (V.trMode === 'blur') { var rv = Object.assign({}, V.revealed); rv[Math.max(V.idx, 0)] = true; V.revealed = rv; }
@@ -1409,7 +1404,6 @@
       V.lines = [];
       V.simple = true;
       V.simpleNote = true;
-      if (readingView) showEditor(false);
     }
   }
 
@@ -1438,7 +1432,7 @@
   }
 
   function focusPickTarget() {
-    if (!V.pickOpen) return;
+    if (!V.pickOpen || lastPointerNav) return;
     var el = document.querySelector('.pick-item.current') || document.querySelector('.pick-item') || pickClose;
     if (el && isShown(el)) el.focus();
   }
@@ -1457,8 +1451,11 @@
   function closePicker(focusBtn) {
     if (!V.pickOpen) return;
     V.pickOpen = false;
-    textEl.hidden = readingView;                         // 编辑框可见性回到内核状态
-    if (focusBtn) Vue.nextTick(function () { pickBtn.focus(); });
+    textEl.hidden = true;                                // 编辑框恒 hidden（2026-11-20 编辑视图下线）
+    if (focusBtn) Vue.nextTick(function () {
+      if (lastPointerNav) { var a = document.activeElement; if (a && a.blur && a !== document.body) a.blur(); }
+      else pickBtn.focus();
+    });
     lastScrolledIdx = -1;
     Vue.nextTick(update);                                 // 卡片/全文重新显示后把当前句滚回可见
   }
@@ -1492,7 +1489,7 @@
     try { history.replaceState(null, '', location.pathname + '?s=' + encodeURIComponent(V.currentId)); } catch (e) { /* 忽略 */ }
     refreshUI();
     renderStatus(null);
-    Vue.nextTick(function () { btn.focus(); });
+    Vue.nextTick(function () { if (!lastPointerNav) btn.focus(); });
     startReading(true);                                   // 同 ?s= 入口：尝试自动播放，被拦则静默，按播放键即可
   }
 
