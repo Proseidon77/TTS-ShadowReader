@@ -1,0 +1,903 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+ player_v2.html —— 微软 TTS 流式朗读（跟读版）
+ 单文件：内联 CSS / JS，不引用任何外部字体、图标、脚本。
+ 接口与现行版 player_current.html 完全一致：POST /play、GET /t/<id>、?text= / ?s=。
+================================================================================
+
+【一、逐句高亮同步算法】
+ 1. 切句：按 。！？!?… 及换行切分（紧跟其后的 」』）)》〉】"'”’ 等收尾符号并入本句；
+    只剩标点的碎片并入上一句），保持原文顺序，每句一行显示。每次新开播都按当时的
+    textarea 内容重新切分。
+ 2. 权重（“先验秒数”）：每句 w = 有效字数 / cps + 句末停顿 + 句内逗号数×0.2s + 省略号数×0.35s。
+      有效字数 = 去掉空白和标点后的字符数；
+      cps（+0% 语速下每秒字数）：ja 6.5、zh 4.6、en 12（英文按字母计）；句末停顿 0.40–0.45s。
+    W = Σw，cum[i] = 前 i 句权重之和。定位时 target = (t / T) × W，二分查找满足
+    cum[i] ≤ target 的最大 i 即当前句（t = audio.currentTime，T = 总时长）。
+ 3. 总时长 T 的来源（每次 timeupdate / seeked / durationchange / 轮询返回时重算）：
+    a. 播放列表已出现 #EXT-X-ENDLIST（合成完毕）：T = audio.duration（有限时），
+       否则 T = 列表中全部 #EXTINF 之和 —— 视为精确。
+    b. 合成进行中（直播状态，duration 常为 Infinity/NaN）：
+       T = max( 先验估计 estTotal,
+                已生成时长下限 = 播放列表 #EXTINF 之和,
+                audio.buffered 末端, audio.duration（若有限）, currentTime )
+       先验估计 estTotal = W / 语速倍率（-20% → 0.8）。若轮询发现已生成时长逼近估计值
+       （≥95%），说明先验偏低，把 estTotal 上调为已生成时长 ×1.15。
+       注：直播期间即使某些浏览器给出有限 duration，也只把它当“下限”参与 max ——
+       在 ENDLIST 出现之前任何播放器都不可能知道真实总长，这样更稳；
+       若播放列表连续 3 次取不到（plFails≥3），则退回直接信任有限的 duration。
+    c. 轮询：会话开始即每 1.5 秒 GET 一次当前 m3u8（cache:no-store），累加 #EXTINF，
+       检测 ENDLIST；ENDLIST 出现后停止轮询，之后完全用精确比例。
+ 4. 暂停：不再有 timeupdate，高亮自然停在当前句；ended：强制停在最后一句。
+    已读句（i < 当前）变淡，当前句黄底加粗＋左侧色条，未读句常态。
+ 5. 误差来源：直播期间依赖先验语速，误差主要在长文本前段；通常 Edge TTS 合成远快于
+    实时，几秒到几十秒内 ENDLIST 就会出现，此后误差只剩“字数≈时长”的近似。
+ 6. 自动滚动：当前句变化时把它平滑滚动到逐行视图的垂直中部。
+    让行策略（二选一，选的是“用户滚动后暂停”）：在逐行视图上检测到 wheel / touch /
+    pointerdown（即用户主动滚动、拖滚动条）后，4 秒内不自动滚动；4 秒后自动回到当前句。
+    （用输入事件而不是 scroll 事件判断，是为了不把程序自己的平滑滚动误判成用户滚动。）
+
+【二、响应式断点与字号】（移动优先，基础样式即手机竖屏）
+   < 1000px  手机/平板：单列；播放按钮全宽，高 ≥72px，文字 clamp(24px, 6.5vw, 30px)；
+             正文 17px；逐行文本 clamp(19px, 4.8vw, 24px)，行高 1.65；textarea 17px。
+   ≥ 600px   平板：逐行文本 clamp(22px, 2.8vw, 28px)，正文 18px。
+   ≥ 1000px  播放按钮与语言/语速同排（按钮占满剩余宽度）。
+   ≥ 1280px  电视大屏：内容居中限宽 1200px；正文 26px；逐行文本 clamp(32px, 2.5vw, 48px)、
+             行高 1.8；textarea 30px；播放按钮高 ≥104px、文字 40px；下拉框/次按钮高 80px、30px；
+             焦点描边加粗到 7px＋16px 黄色光环。
+   prefers-reduced-motion: reduce 时关闭平滑滚动与过渡动画。
+
+【三、遥控器 / 键盘操作】
+   · 页面加载后焦点默认在「播放」按钮上。
+   · ↑↓←→：按屏幕上的实际位置（空间导航，取该方向上最近的控件）在
+     播放按钮、语言、语速、编辑/返回跟读按钮、文本框/逐行视图、音频控件之间移动焦点。
+     焦点在下拉框上时方向键只移动焦点，不会误改选项。
+   · 焦点在 textarea 内：方向键保持原生编辑行为；只有光标已在最开头再按 ↑、
+     或已在最末尾再按 ↓ 时才跳出文本框；Esc 或 webOS 返回键（keyCode 461）跳回播放按钮。
+   · Enter（keyCode 13，webOS 确定键）/ 空格：
+       播放按钮 → 开始 / 暂停 / 继续；编辑按钮 → 切换编辑态与跟读态；
+       下拉框 → 打开选项列表（不支持 showPicker 的浏览器改为循环切换到下一项）；
+       音频控件 → 播放/暂停；逐行视图 → 进入编辑态并聚焦文本框。
+   · 焦点在音频控件上按 ←/→（该方向没有其它控件）：后退/前进 5 秒。
+   · 媒体键（播放/暂停 179、webOS 播放 415、暂停 19）：同播放按钮。
+
+【四、与现行版（player_current.html）的差异】
+   保留：POST /play {text, lang, rate} → audio.src = url → play()；?text=&lang=&rate= 与 ?s=<id>
+         两种传参及填好后静默自动播放一次；textarea / 语言 / 语速 / 播放按钮 / <audio controls>；
+         默认文本、选项与默认值（ja、-20%）；出错 alert('播放失败：…')（自动播放时静默）；
+         底部说明文字；空文本不请求。
+   新增/变化：
+   1. 播放后文本区切换为逐行跟读视图，当前句高亮＋自动居中滚动，已读变淡；
+      「✎ 编辑文本 / ☰ 返回跟读」按钮在两种视图间切换；视图下方显示“第 i / n 句”及估算状态。
+   2. 播放按钮变大并成为开始/暂停/继续/重新播放的切换键（跟随 audio 实际状态）；
+      文本或语言/语速改过后按钮回到「播放」，再按即按新内容重新切句、重新建会话。
+      现行版每按一次都会新建会话；新版在内容未变且未播完时改为暂停/继续。
+   3. 准备中不再用 disabled（会让遥控器焦点丢失），改为 aria-busy＋忽略重复点击；300ms 防抖。
+   4. 手机/电视响应式布局、大号高对比焦点框、方向键空间导航、媒体键支持。
+   5. 传参容错：rate 里的“+”被 URL 解码成空格时（?rate=+0%）自动还原为“+”；
+      不在列表中的合法 rate（如 -10%）会临时加一个“自定义”选项以原样使用；
+      不认识的 lang 忽略（保持默认 ja），现行版此时会把空值发给服务端。
+   6. play() 的 AbortError（播放请求被随后的暂停打断）不再弹窗。
+================================================================================
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微软 TTS 流式朗读 · 跟读版</title>
+<style>
+  :root {
+    --bg: #f7f5f0;
+    --paper: #fffdf8;
+    --ink: #1b1b1b;
+    --muted: #5a554c;
+    --line-done: #8a857c;
+    --brand: #1f5a99;
+    --brand-dark: #163f6b;
+    --hl: #ffe07a;
+    --focus-ring: #0b1b33;
+    --focus-halo: #ffc800;
+    --rh: 52vh;                 /* 文本区 / 逐行视图高度 */
+    --fs-line: clamp(19px, 4.8vw, 24px);
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, "Helvetica Neue", "PingFang SC", "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+                 "Microsoft YaHei", "Yu Gothic", "Noto Sans CJK SC", sans-serif;
+    font-size: 17px;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 14px 14px 28px; }
+  h1 { font-size: 22px; margin: 4px 0 2px; letter-spacing: .02em; }
+  .sub { margin: 0 0 12px; color: var(--muted); font-size: 14px; }
+
+  /* ---------- 文本区：编辑态 textarea / 播放态逐行视图，同一位置切换 ---------- */
+  #text, .reader {
+    display: block;
+    width: 100%;
+    height: var(--rh);
+    min-height: 240px;
+    border: 2px solid #cbc4b6;
+    border-radius: 12px;
+    background: var(--paper);
+    color: var(--ink);
+  }
+  #text {
+    font: inherit;
+    font-size: 17px;
+    line-height: 1.7;
+    padding: 12px 14px;
+    resize: vertical;
+  }
+  .reader {
+    position: relative;          /* 让子元素 offsetTop 以本容器为基准，便于居中计算 */
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    padding: calc(var(--rh) * .3) 10px;   /* 上下留白，首末句也能滚到中部 */
+  }
+  .line {
+    margin: 0 0 .3em;
+    padding: .22em .6em;
+    border-radius: 10px;
+    font-size: var(--fs-line);
+    line-height: 1.65;
+    transition: background-color .25s, color .25s;
+  }
+  .line.done { color: var(--line-done); }
+  .line.cur {
+    background: var(--hl);
+    color: #000;
+    font-weight: 700;
+    box-shadow: inset 6px 0 0 var(--brand);
+  }
+  .status { margin: 6px 2px 0; min-height: 1.4em; color: var(--muted); font-size: 14px; }
+
+  /* ---------- 控件 ---------- */
+  .controls { display: flex; flex-direction: column; gap: 12px; margin: 14px 0 10px; }
+  .play {
+    width: 100%;
+    min-height: 72px;
+    padding: 10px 20px;
+    display: flex; align-items: center; justify-content: center; gap: .45em;
+    border: none; border-radius: 14px;
+    background: var(--brand); color: #fff;
+    font: inherit; font-size: clamp(24px, 6.5vw, 30px); font-weight: 700;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .play .ico { font-size: 1.05em; line-height: 1; min-width: 1em; text-align: center; }
+  .play:hover { background: var(--brand-dark); }
+  .play.is-playing { background: var(--brand-dark); }
+  .play[aria-busy="true"] { opacity: .8; cursor: progress; }
+  .opts { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
+  .field { display: flex; align-items: center; gap: 8px; flex: 1 1 40%; font-size: 17px; white-space: nowrap; }
+  .field select { flex: 1 1 auto; min-width: 0; }
+  select, .ghost {
+    font: inherit; font-size: 18px;
+    min-height: 52px; padding: 6px 12px;
+    border-radius: 10px; border: 2px solid #aaa294;
+    background: #fff; color: var(--ink);
+  }
+  .ghost {
+    flex: 1 1 100%;
+    border-color: var(--brand); color: var(--brand); font-weight: 600;
+    cursor: pointer; touch-action: manipulation;
+  }
+  audio { display: block; width: 100%; margin-top: 4px; border-radius: 10px; }
+  .note { color: #5f5a52; font-size: 14px; line-height: 1.7; margin-top: 16px; }
+
+  /* ---------- 焦点：大号高对比（深色描边 + 黄色光环）+ 轻微放大，3 米外可辨 ---------- */
+  button, select, textarea, .reader, audio { transition: transform .12s ease, box-shadow .12s ease; }
+  button:focus, button:focus-visible,
+  select:focus, select:focus-visible,
+  textarea:focus, textarea:focus-visible,
+  .reader:focus, .reader:focus-visible,
+  audio:focus, audio:focus-visible {
+    outline: 5px solid var(--focus-ring);
+    outline-offset: 3px;
+    box-shadow: 0 0 0 12px var(--focus-halo);
+    position: relative; z-index: 2;
+    transform: scale(1.03);
+  }
+  textarea:focus, textarea:focus-visible,
+  .reader:focus, .reader:focus-visible { transform: scale(1.01); }
+
+  /* ≥600px 平板 */
+  @media (min-width: 600px) {
+    body { font-size: 18px; }
+    :root { --fs-line: clamp(22px, 2.8vw, 28px); }
+    .wrap { padding: 20px 22px 32px; }
+    h1 { font-size: 26px; }
+    .ghost { flex: 0 0 auto; }
+  }
+  /* ≥1000px 播放按钮与选项同排 */
+  @media (min-width: 1000px) {
+    .controls { flex-direction: row; align-items: stretch; }
+    .play { flex: 1 1 auto; width: auto; }
+    .opts { flex: 0 0 auto; flex-wrap: nowrap; }
+    .field { flex: 0 0 auto; }
+  }
+  /* ≥1280px 电视大屏：整体放大，居中限宽 1200px */
+  @media (min-width: 1280px) {
+    :root { --rh: 54vh; --fs-line: clamp(32px, 2.5vw, 48px); }
+    body { font-size: 26px; }
+    .wrap { max-width: 1200px; padding: 30px 40px 48px; }
+    h1 { font-size: 42px; }
+    .sub { font-size: 24px; margin-bottom: 18px; }
+    #text, .reader { border-width: 3px; border-radius: 18px; }
+    #text { font-size: 30px; line-height: 1.8; padding: 18px 24px; }
+    .reader { padding-left: 18px; padding-right: 18px; }
+    .line { line-height: 1.8; margin-bottom: .35em; border-radius: 14px; }
+    .line.cur { box-shadow: inset 10px 0 0 var(--brand); }
+    .status { font-size: 22px; }
+    .controls { gap: 22px; margin: 22px 0 14px; }
+    .play { min-height: 104px; font-size: 40px; border-radius: 18px; }
+    .field { font-size: 28px; gap: 12px; }
+    select, .ghost { font-size: 30px; min-height: 80px; padding: 8px 20px; border-width: 3px; border-radius: 14px; }
+    audio { height: 64px; }
+    .note { font-size: 22px; }
+    button:focus, button:focus-visible,
+    select:focus, select:focus-visible,
+    textarea:focus, textarea:focus-visible,
+    .reader:focus, .reader:focus-visible,
+    audio:focus, audio:focus-visible {
+      outline-width: 7px; outline-offset: 4px;
+      box-shadow: 0 0 0 16px var(--focus-halo);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <h1>微软 TTS 流式朗读</h1>
+  <p class="sub">跟读版 · 边合成边播放，逐句高亮</p>
+
+  <section class="stage">
+<textarea id="text" aria-label="朗读文本" spellcheck="false">大丈夫ですか？
+水…
+起きれますか？
+スポーツ飲料も買ってきました。常温です。
+汗びっしょりです。着替えて布団に入ってください。
+クローゼット開けても構いませんか？
+着替える前に汗ふきましょう。
+アイスチョコとバニラ、どっちがいいですか？
+バニラ。
+薬も置いときますね。
+買い物代金…カバンの中の財布から持っていってください。
+勝手にとっていいんですか？
+森山さんは信用してるんで。あと、今日の分のお給料払うんで。
+分かりました。じゃあ手伝いが必要な時は声かけてください。
+すいません、起こしました？
+いえ。
+熱だいぶ下がったみたいです。体温計持ってくればよかった。
+それじゃあ帰りますね。
+時間の超過分は？
+いりませんよ。ご飯作っただけですし。</textarea>
+    <p id="shareTitle" class="status" style="font-size:19px;font-weight:700" hidden></p>
+    <div id="reader" class="reader" tabindex="0" role="region" aria-label="逐行跟读（按确定键编辑文本）" hidden></div>
+    <p id="status" class="status"></p>
+  </section>
+
+  <div class="controls">
+    <button id="play" class="play" type="button" autofocus><span class="ico" aria-hidden="true">&#x25B6;&#xFE0E;</span><span class="lbl">播放</span></button>
+    <div class="opts">
+      <label class="field">语言
+        <select id="lang">
+          <option value="ja" selected>日语（Nanami）</option>
+          <option value="zh">中文（晓晓）</option>
+          <option value="en">英语（Aria）</option>
+        </select>
+      </label>
+      <label class="field">语速
+        <select id="rate">
+          <option value="-20%" selected>80%</option>
+          <option value="+0%">100%</option>
+          <option value="-40%">60%</option>
+        </select>
+      </label>
+      <button id="edit" class="ghost" type="button" hidden>✎ 编辑文本</button>
+    </div>
+  </div>
+
+  <audio id="player" controls preload="none" tabindex="0"></audio>
+  <p class="note">音频由微软 Edge TTS 实时合成，经这台电脑切成小段（HLS 流）边合成边播，不等整段生成完。文本可改，改完点播放即可。<br>
+  遥控器：方向键移动焦点，确定键操作；在文本框里按返回键（或 Esc）回到播放按钮。</p>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var audio = $('player');
+  var btn = $('play');
+  var btnIco = btn.querySelector('.ico');
+  var btnLbl = btn.querySelector('.lbl');
+  var textEl = $('text');
+  var langEl = $('lang');
+  var rateEl = $('rate');
+  var editBtn = $('edit');
+  var reader = $('reader');
+  var statusEl = $('status');
+
+  // ---------------- 同步参数（说明见文件头注释） ----------------
+  var PRIOR = {                      // +0% 语速下的每秒有效字数、句末停顿秒数
+    ja: { cps: 6.5, pause: 0.45 },
+    zh: { cps: 4.6, pause: 0.45 },
+    en: { cps: 12,  pause: 0.40 }
+  };
+  var COMMA_PAUSE = 0.2;
+  var ELLIPSIS_PAUSE = 0.35;
+  var POLL_MS = 1500;
+  var USER_SCROLL_PAUSE_MS = 4000;
+  var SPLIT_RE = /[^。！？!?…\n]*[。！？!?…]+[」』）)》〉】"'”’]*|[^。！？!?…\n]+/g;
+  var PUNCT_ONLY_RE = /^[\s。！？!?…」』）)》〉】"'”’]+$/;
+  var STRIP_RE = /[\s。．.！？!?…、，,；;：:「」『』（）()《》〈〉【】"'“”‘’\-—~～・]/g;
+
+  var S = null;          // 当前朗读会话
+  var busy = false;      // POST /play 进行中
+  var readingView = false;
+  var lastActivate = 0;
+  var userScrollUntil = 0;
+  var lastScrolledIdx = -1;
+  var resumeTimer = null;
+  var SMOOTH = ('scrollBehavior' in document.documentElement.style) &&
+    !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+  // ---------------- 切句与权重 ----------------
+  function splitSentences(text) {
+    var out = [], m;
+    SPLIT_RE.lastIndex = 0;
+    while ((m = SPLIT_RE.exec(text)) !== null) {
+      var s = m[0].trim();
+      if (!s) continue;
+      if (out.length && PUNCT_ONLY_RE.test(s)) out[out.length - 1] += s;
+      else out.push(s);
+    }
+    return out;
+  }
+
+  function weightOf(s, prior) {
+    var commas = (s.match(/[、，,；;：:]/g) || []).length;
+    var ellipses = (s.match(/…+|\.{3,}/g) || []).length;
+    var chars = s.replace(STRIP_RE, '').length;
+    return chars / prior.cps + prior.pause + commas * COMMA_PAUSE + ellipses * ELLIPSIS_PAUSE;
+  }
+
+  function speedOf(rate) {
+    var m = /^([+-]?\d+)%$/.exec(rate || '');
+    var v = m ? parseInt(m[1], 10) : 0;
+    return Math.max(0.3, 1 + v / 100);
+  }
+
+  // ---------------- 会话 ----------------
+  function newSession(text, lang, rate, url) {
+    if (S) clearTimeout(S.pollTimer);
+    var prior = PRIOR[lang] || PRIOR.ja;
+    var parts = splitSentences(text);
+    var cum = [0], W = 0, nodes = [];
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < parts.length; i++) {
+      W += weightOf(parts[i], prior);
+      cum.push(W);
+      var el = document.createElement('p');
+      el.className = 'line';
+      el.textContent = parts[i];
+      frag.appendChild(el);
+      nodes.push(el);
+    }
+    reader.textContent = '';
+    reader.appendChild(frag);
+    S = {
+      text: text, lang: lang, rate: rate, url: url,
+      nodes: nodes, cum: cum, W: W,
+      estTotal: W / speedOf(rate),   // 先验总时长（秒）
+      plSum: 0,                      // 播放列表 #EXTINF 之和 = 已生成时长
+      plEnded: false,                // 是否已见 #EXT-X-ENDLIST
+      forceEnded: false,             // 看门狗判定已播完（webOS 不发 ended 事件时）
+      maxT: 0,                       // 本会话见过的最大有限 currentTime
+      lastT: -1,                     // 看门狗上次见到的 currentTime
+      plFails: 0,
+      pollTimer: null,
+      idx: -1
+    };
+    lastScrolledIdx = -1;
+    userScrollUntil = 0;
+    showReader();
+    reader.scrollTop = 0;
+    poll(S);
+  }
+
+  // 轮询 m3u8：累加 #EXTINF 得已生成时长，检测 ENDLIST
+  function poll(sess) {
+    if (S !== sess || sess.plEnded) return;
+    fetch(sess.url, { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.text();
+      })
+      .then(function (body) {
+        if (S !== sess) return;
+        var sum = 0, re = /#EXTINF:\s*([\d.]+)/g, m;
+        while ((m = re.exec(body)) !== null) sum += parseFloat(m[1]) || 0;
+        sess.plSum = sum;
+        sess.plFails = 0;
+        if (body.indexOf('#EXT-X-ENDLIST') >= 0) sess.plEnded = true;
+        else if (sum > sess.estTotal * 0.95) sess.estTotal = sum * 1.15;  // 先验偏低，上调
+        update();
+      })
+      .catch(function () { if (S === sess) sess.plFails++; })
+      .then(function () {
+        if (S === sess && !sess.plEnded && sess.plFails < 10) {
+          sess.pollTimer = setTimeout(function () { poll(sess); }, POLL_MS);
+        }
+      });
+  }
+
+  function bufferedEnd() {
+    try {
+      var b = audio.buffered;
+      return b && b.length ? b.end(b.length - 1) : 0;
+    } catch (e) { return 0; }
+  }
+
+  // 返回 {total, exact}
+  function totalDuration() {
+    var d = audio.duration;
+    var dOk = isFinite(d) && d > 0;
+    if (S.plEnded) return { total: dOk ? d : S.plSum, exact: true };
+    if (dOk && S.plFails >= 3) return { total: d, exact: true };   // 拿不到列表时只能信 duration
+    var lower = Math.max(S.plSum, bufferedEnd(), dOk ? d : 0, audio.currentTime || 0);
+    return { total: Math.max(lower, S.estTotal), exact: false };
+  }
+
+  function locate(x) {               // cum[i] ≤ x 的最大 i
+    var lo = 0, hi = S.nodes.length - 1;
+    while (lo < hi) {
+      var mid = (lo + hi + 1) >> 1;
+      if (S.cum[mid] <= x) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  function setCurrent(i) {
+    if (i === S.idx) return;
+    S.idx = i;
+    for (var j = 0; j < S.nodes.length; j++) {
+      var el = S.nodes[j];
+      el.className = j < i ? 'line done' : (j === i ? 'line cur' : 'line');
+      if (j === i) el.setAttribute('aria-current', 'true'); else el.removeAttribute('aria-current');
+    }
+  }
+
+  function update() {
+    if (!S || !S.nodes.length) return;
+    var n = S.nodes.length, i, exact;
+    if (audio.ended || S.forceEnded) {
+      i = n - 1; exact = true;                       // 播放结束停在最后一句
+    } else {
+      var t = audio.currentTime || 0;
+      if (!audio.getAttribute('src') || (t === 0 && audio.paused && S.idx < 0)) { renderStatus(null); return; }
+      var info = totalDuration();
+      exact = info.exact;
+      var target = info.total > 0 ? Math.min(1, t / info.total) * S.W : 0;
+      i = locate(target);
+    }
+    setCurrent(i);
+    maybeScroll();
+    renderStatus(exact);
+  }
+
+  function renderStatus(exact) {
+    if (!S || !readingView) { statusEl.textContent = ''; return; }
+    var n = S.nodes.length;
+    if (S.idx < 0 || exact === null) { statusEl.textContent = '共 ' + n + ' 句'; return; }
+    var s = '第 ' + (S.idx + 1) + ' / ' + n + ' 句';
+    if (!exact) s += ' · 合成中，进度为估算（已生成 ' + Math.round(S.plSum) + ' 秒）';
+    statusEl.textContent = s;
+  }
+
+  // ---------------- 自动滚动（用户滚动后让行 4 秒） ----------------
+  function onUserScroll() {
+    userScrollUntil = Date.now() + USER_SCROLL_PAUSE_MS;
+    clearTimeout(resumeTimer);
+    resumeTimer = setTimeout(function () { lastScrolledIdx = -1; update(); }, USER_SCROLL_PAUSE_MS + 50);
+  }
+  ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'mousedown'].forEach(function (ev) {
+    reader.addEventListener(ev, onUserScroll, { passive: true });
+  });
+
+  function maybeScroll() {
+    if (!readingView || !S || S.idx < 0) return;
+    if (Date.now() < userScrollUntil) return;
+    if (S.idx === lastScrolledIdx) return;
+    lastScrolledIdx = S.idx;
+    var el = S.nodes[S.idx];
+    var top = Math.max(0, el.offsetTop - (reader.clientHeight - el.offsetHeight) / 2);
+    if (SMOOTH && reader.scrollTo) {
+      try { reader.scrollTo({ top: top, behavior: 'smooth' }); return; } catch (e) { /* 回落 */ }
+    }
+    reader.scrollTop = top;
+  }
+
+  // ---------------- 视图切换 ----------------
+  function showReader() {
+    if (!S) return;
+    var hadFocus = document.activeElement === textEl;
+    readingView = true;
+    textEl.hidden = true;
+    reader.hidden = false;
+    lastScrolledIdx = -1;
+    if (hadFocus) reader.focus();
+    refreshUI();
+    update();
+  }
+
+  function showEditor(focusText) {
+    var hadFocus = document.activeElement === reader;
+    readingView = false;
+    reader.hidden = true;
+    textEl.hidden = false;
+    if (focusText || hadFocus) textEl.focus();
+    renderStatus(null);
+    refreshUI();
+  }
+
+  // ---------------- 播放按钮 ----------------
+  function sessionMatches() {
+    return !!S && S.text === textEl.value.trim() && S.lang === langEl.value && S.rate === rateEl.value;
+  }
+
+  function setBtn(ico, lbl, playing) {
+    btnIco.textContent = ico;
+    btnLbl.textContent = lbl;
+    btn.classList.toggle('is-playing', !!playing);
+  }
+
+  function refreshUI() {
+    if (busy) {
+      btn.setAttribute('aria-busy', 'true');
+      setBtn('⏳︎', '准备中…');
+    } else {
+      btn.removeAttribute('aria-busy');
+      if (!sessionMatches() || !audio.getAttribute('src')) setBtn('▶︎', '播放');
+      else if (audio.ended || (S && S.forceEnded)) setBtn('↻', '重新播放');
+      else if (!audio.paused) setBtn('⏸︎', '暂停', true);
+      else if (audio.currentTime > 0) setBtn('▶︎', '继续');
+      else setBtn('▶︎', '播放');
+    }
+    var showEdit = readingView || sessionMatches();
+    if (!showEdit && document.activeElement === editBtn) btn.focus();
+    editBtn.hidden = !showEdit;
+    editBtn.textContent = readingView ? '✎ 编辑文本' : '☰ 返回跟读';
+  }
+
+  // 桌面 Chrome 的原生 HLS 实现会把直播边缘与开头两段缓冲混播（音频串段），
+  // 改走 hls.js（MSE）：从头起播、顺序稳定。Safari / webOS / iOS Chrome 用原生。
+  var hlsObj = null, hlsLibPromise = null;
+  function hlsWanted() {
+    var ua = navigator.userAgent || '';
+    return /Chrome\//.test(ua) && !/CriOS|webOS|WebOS|LG Browser|Edg\//.test(ua) && !!window.MediaSource;
+  }
+  function loadHlsLib() {
+    if (window.Hls) return Promise.resolve();
+    if (hlsLibPromise) return hlsLibPromise;
+    hlsLibPromise = new Promise(function (res, rej) {
+      var sc = document.createElement('script');
+      sc.src = '/hls.min.js';
+      sc.onload = res;
+      sc.onerror = rej;
+      document.head.appendChild(sc);
+    });
+    return hlsLibPromise;
+  }
+  function attachHls(url, quiet) {
+    loadHlsLib().then(function () {
+      if (!window.Hls || !Hls.isSupported()) { audio.src = url; var p0 = audio.play(); if (p0 && p0.catch) p0.catch(function () {}); return; }
+      if (hlsObj) { try { hlsObj.destroy(); } catch (e) {} hlsObj = null; }
+      hlsObj = new Hls({ startPosition: 0, liveSyncDurationCount: 1 });
+      hlsObj.loadSource(url);
+      hlsObj.attachMedia(audio);
+      hlsObj.on(Hls.Events.MANIFEST_PARSED, function () {
+        var p = audio.play();
+        if (p && p.catch) p.catch(function (e) { if (!quiet && e && e.name !== 'AbortError') alert('播放失败：' + e.message); });
+      });
+      hlsObj.on(Hls.Events.ERROR, function (evt, data) {
+        if (data && data.fatal) { try { hlsObj.destroy(); } catch (e) {} hlsObj = null; audio.src = url; }
+      });
+    }).catch(function () { audio.src = url; });
+  }
+
+  async function startReading(quiet) {
+    var text = textEl.value.trim();
+    if (!text || busy) return;
+    busy = true;
+    refreshUI();
+    var lang = langEl.value, rate = rateEl.value;
+    try {
+      var resp = await fetch('/play', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, lang: lang, rate: rate })
+      });
+      var data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+      newSession(text, lang, rate, data.url);
+      autoArmed = !!quiet;               // 自动播放建的会话不算数：首次手动按键从头重播
+      if (hlsWanted()) {
+        pendingRewind = false;           // hls.js 以 startPosition:0 从头播，无需纠正
+        attachHls(data.url, quiet);
+      } else {
+        pendingRewind = true;            // 原生 HLS：首次起播时纠正直播边缘（见 rewindOnce）
+        audio.src = data.url;
+        await audio.play();
+      }
+    } catch (e) {
+      if (!quiet && !(e && e.name === 'AbortError')) alert('播放失败：' + e.message);
+    }
+    busy = false;
+    refreshUI();
+  }
+
+  function onPlayActivate() {
+    var now = Date.now();
+    if (now - lastActivate < 300 || busy) return;    // 防抖：遥控器偶发重复触发
+    lastActivate = now;
+    if (autoArmed) { autoArmed = false; startReading(false); return; }
+    if (sessionMatches() && audio.getAttribute('src') && !audio.ended && !(S && S.forceEnded)) {
+      if (audio.paused) {
+        showReader();
+        var p = audio.play();
+        if (p && p.catch) {
+          p.catch(function (e) {
+            if (e && e.name === 'AbortError') return;
+            if (e && e.name === 'NotAllowedError') { alert('播放失败：' + e.message); return; }
+            startReading(false);             // 会话失效（如已被服务端清理）则重建
+          });
+        }
+      } else {
+        audio.pause();
+      }
+    } else {
+      startReading(false);                   // 无会话 / 内容已改 / 已播完：按当前内容重新开始
+    }
+  }
+
+  function toggleAudio() {
+    if (!audio.getAttribute('src')) { onPlayActivate(); return; }
+    if (audio.paused) { var p = audio.play(); if (p && p.catch) p.catch(function () {}); }
+    else audio.pause();
+  }
+
+  btn.addEventListener('click', onPlayActivate);
+  editBtn.addEventListener('click', function () {
+    if (readingView) showEditor(true);
+    else if (sessionMatches()) showReader();
+  });
+  textEl.addEventListener('input', refreshUI);
+  langEl.addEventListener('change', refreshUI);
+  rateEl.addEventListener('change', refreshUI);
+  ['timeupdate', 'seeked', 'durationchange', 'loadedmetadata', 'play', 'playing', 'pause', 'ended', 'emptied']
+    .forEach(function (ev) {
+      audio.addEventListener(ev, function () { update(); refreshUI(); });
+    });
+
+  // 直播型 HLS 起播纠正：无 ENDLIST 时 WebKit 会从直播边缘（最新段）起播。
+  // 只在新会话首次 loadedmetadata / playing 时检查一次：那时若位置已偏离开头，
+  // 说明是边缘起播，拉回开头；正常从头播时位置≈起点，纠正等于无操作。
+  // 绝不能在播放进行中反复纠正——正常播放时 currentTime 本来就会超过起点，
+  // 反复拉回会把第一句循环播放（上一版时间窗方案的教训）。
+  var pendingRewind = false, autoArmed = false;
+  function rewindOnce(ev) {
+    if (!pendingRewind) return;
+    try {
+      var start = (audio.seekable && audio.seekable.length) ? audio.seekable.start(0) : 0;
+      if ((audio.currentTime || 0) > start + 0.3) {
+        audio.currentTime = start;
+        pendingRewind = false;
+      } else if (ev && ev.type === 'playing') {
+        pendingRewind = false;   // 已起播且位置正常，纠正完毕
+      }
+    } catch (err) { /* 直播窗口不可拖动时忽略，下个事件再试 */ }
+  }
+  ['loadedmetadata', 'playing'].forEach(function (ev) {
+    audio.addEventListener(ev, function (e) { rewindOnce(e); });
+  });
+
+  // 结束看门狗：webOS 浏览器播 HLS 到结尾时可能不发 ended 事件、也不暂停，
+  // 按钮会永远停在「暂停」。合成已结束（ENDLIST 已见）且播放位置抵达总长、
+  // 连续两次检查都不再前进时，判定播完：暂停并把按钮切到「重新播放」。
+  setInterval(function () {
+    if (!S || !S.plEnded || S.forceEnded || audio.ended || !audio.getAttribute('src')) { if (S) S.lastT = -1; return; }
+    var total = totalDuration().total;
+    var rawT = audio.currentTime;
+    var t = isFinite(rawT) ? rawT : -1;
+    // 两种结束形态：①位置抵达总长且不再前进；②webOS 实测形态——
+    // 播到尾部后 currentTime 直接变 NaN、ended 不发、paused 仍 false。
+    var atEnd = total > 0 && t >= 0 && t >= total - 0.35 && S.lastT >= 0 && Math.abs(t - S.lastT) < 0.01;
+    var nanEnd = total > 0 && t < 0 && S.maxT > total * 0.9;
+    if (atEnd || nanEnd) {
+      S.forceEnded = true;
+      try { audio.pause(); } catch (err) { /* 忽略 */ }
+      update();
+      refreshUI();
+    } else if (t >= 0) {
+      S.lastT = t;
+      if (t > S.maxT) S.maxT = t;
+    }
+  }, 1000);
+
+
+  // ---------------- 遥控器 / 方向键空间导航 ----------------
+  var NAV = [btn, langEl, rateEl, editBtn, textEl, reader, audio];
+
+  function isShown(el) {
+    return !el.hidden && !el.disabled && el.getClientRects().length > 0;
+  }
+
+  function findNext(from, dir) {
+    var a = from.getBoundingClientRect();
+    var acx = (a.left + a.right) / 2, acy = (a.top + a.bottom) / 2;
+    var TOL = 10, best = null, bestScore = Infinity;
+    NAV.forEach(function (el) {
+      if (el === from || !isShown(el)) return;
+      var b = el.getBoundingClientRect();
+      var bcx = (b.left + b.right) / 2, bcy = (b.top + b.bottom) / 2;
+      var primary, secondary;
+      if (dir === 'down' || dir === 'up') {
+        if (dir === 'down' ? b.top < a.bottom - TOL : b.bottom > a.top + TOL) return;
+        primary = dir === 'down' ? b.top - a.bottom : a.top - b.bottom;
+        secondary = Math.abs(bcx - acx);
+      } else {
+        if (dir === 'right' ? b.left < a.right - TOL : b.right > a.left + TOL) return;
+        if (b.bottom <= a.top || b.top >= a.bottom) return;   // 左右只在同一排内移动
+        primary = dir === 'right' ? b.left - a.right : a.left - b.right;
+        secondary = Math.abs(bcy - acy);
+      }
+      var score = Math.max(0, primary) + secondary * 2;
+      if (score < bestScore) { bestScore = score; best = el; }
+    });
+    return best;
+  }
+
+  function openSelect(sel) {
+    if (typeof sel.showPicker === 'function') {
+      try { sel.showPicker(); return; } catch (e) { /* 不支持则循环切换 */ }
+    }
+    sel.selectedIndex = (sel.selectedIndex + 1) % sel.options.length;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  var DIRS = { 37: 'left', 38: 'up', 39: 'right', 40: 'down' };
+  var DIR_KEYS = { ArrowLeft: 'left', ArrowUp: 'up', ArrowRight: 'right', ArrowDown: 'down',
+                   Left: 'left', Up: 'up', Right: 'right', Down: 'down' };
+
+  document.addEventListener('keydown', function (e) {
+    var code = e.keyCode, key = e.key, t = document.activeElement;
+    var dir = DIR_KEYS[key] || DIRS[code];
+    var isEnter = code === 13 || key === 'Enter';
+    var isSpace = code === 32 || key === ' ' || key === 'Spacebar';
+
+    // 媒体键：播放/暂停
+    if (code === 179 || code === 415 || code === 19 ||
+        key === 'MediaPlayPause' || key === 'MediaPlay' || key === 'MediaPause') {
+      e.preventDefault();
+      onPlayActivate();
+      return;
+    }
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+
+    // textarea 内：保持原生编辑；只在光标到头/到尾时才让方向键跳出
+    if (t === textEl) {
+      if (e.shiftKey) return;
+      var len = textEl.value.length;
+      var atStart = textEl.selectionStart === 0 && textEl.selectionEnd === 0;
+      var atEnd = textEl.selectionStart === len && textEl.selectionEnd === len;
+      if ((dir === 'up' && atStart) || (dir === 'down' && atEnd)) {
+        var out = findNext(textEl, dir);
+        if (out) { e.preventDefault(); out.focus(); }
+      } else if (key === 'Escape' || key === 'Esc' || code === 27 || code === 461) {
+        e.preventDefault();
+        btn.focus();
+      }
+      return;
+    }
+
+    if (dir) {
+      if (NAV.indexOf(t) < 0) { e.preventDefault(); btn.focus(); return; }   // 焦点丢失时先回到播放键
+      var next = findNext(t, dir);
+      if (next) {
+        e.preventDefault();
+        next.focus();
+      } else if (t === audio && (dir === 'left' || dir === 'right')) {
+        e.preventDefault();
+        try { audio.currentTime = Math.max(0, audio.currentTime + (dir === 'left' ? -5 : 5)); } catch (err) { /* 直播不可拖动时忽略 */ }
+      } else if (t.tagName === 'SELECT' || dir === 'left' || dir === 'right') {
+        e.preventDefault();          // 不让方向键改下拉框选项 / 横向乱滚
+      }                              // 上下没有目标时放行，页面可原生滚动
+      return;
+    }
+
+    if (isEnter || isSpace) {
+      if (t === btn || t === editBtn) {
+        if (isEnter) { e.preventDefault(); if (!e.repeat) t.click(); }   // 空格交给原生 click
+        return;
+      }
+      if (e.repeat) { e.preventDefault(); return; }
+      if (t === langEl || t === rateEl) { e.preventDefault(); openSelect(t); return; }
+      if (t === audio) { e.preventDefault(); toggleAudio(); return; }
+      if (t === reader) { e.preventDefault(); showEditor(true); return; }
+    }
+  });
+
+  // ---------------- 传参与自动播放（与现行版一致） ----------------
+  function setSelect(sel, v) {
+    if (!v) return;
+    v = String(v);
+    if (sel === rateEl && /^ \d/.test(v)) v = '+' + v.slice(1);   // ?rate=+0% 中的 + 被解码成空格
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === v) { sel.value = v; return; }
+    }
+    if (sel === rateEl && /^[+-]\d+%$/.test(v)) {                 // 合法但不在列表里的语速：临时加一项
+      var opt = document.createElement('option');
+      var pct = 100 + parseInt(v, 10);
+      opt.value = v;
+      opt.textContent = '自定义 ' + pct + '%';
+      sel.appendChild(opt);
+      sel.value = v;
+    }
+  }
+
+  function focusPlay() {
+    if (!document.activeElement || document.activeElement === document.body) btn.focus();
+  }
+  btn.focus();
+  window.addEventListener('load', focusPlay);
+  refreshUI();
+
+  // 带参数打开：?text=<内容>&lang=ja&rate=-20% 或 ?s=<分享ID>
+  // 填好文本与选项后自动尝试播放；被浏览器拦下时点一下播放键即可。
+  (async function () {
+    var q = new URLSearchParams(location.search);
+    var changed = false;
+    if (q.get('s')) {
+      try {
+        var r = await fetch('/t/' + encodeURIComponent(q.get('s')));
+        if (r.ok) {
+          var item = await r.json();
+          if (item.title) {
+            var st = document.getElementById('shareTitle');
+            st.textContent = item.title;
+            st.hidden = false;
+            document.title = item.title + ' · 日语朗读页';
+          }
+          textEl.value = item.text || '';
+          setSelect(langEl, item.lang);
+          setSelect(rateEl, item.rate);
+          changed = true;
+        }
+      } catch (e) { /* 分享取不到就用页面默认文本 */ }
+    } else if (q.get('text')) {
+      textEl.value = q.get('text');
+      setSelect(langEl, q.get('lang'));
+      setSelect(rateEl, q.get('rate'));
+      changed = true;
+    }
+    refreshUI();
+    if (changed) startReading(true);
+  })();
+})();
+</script>
+</body>
+</html>

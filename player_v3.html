@@ -1,0 +1,1524 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+ player_v3.html —— 微软 TTS 流式朗读（跟读版 v3：当前句卡片＋小字全文，Vue 3）
+ 单文件；只引用同源 /vue.global.prod.js（Vue 3.5.24 全局包，无构建链）与 /hls.min.js（同 v2）。
+ 挂在 /v3 与默认页 v2 并行试用；数据取 GET /v3/t/<id>（旧 /t 字段＋当前版本 sentences）。
+================================================================================
+
+【一、移植对照（v2 → v3）】播放内核逐函数原样搬入，只改“渲染落点”：
+   v2 函数/变量                     v3 处理
+   PRIOR/COMMA_PAUSE/…/SPLIT_RE     原样
+   splitSentences / speedOf         原样（简易模式与 ?text= 入口仍用客户端分句）
+   weightOf                         原样；富模式下“有效字数”改用该句 kana（读音）长度，cps 用 kcps
+                                    （ja 7.5 拍/秒）——kana 比汉字字数更接近实际发音时长（P4 口径 6）
+   newSession                       原样建会话；句子来源：富数据且文本未改 → 服务端 sentences，
+                                    否则 v2 客户端分句；不再自建 .line 节点，改写 V.lines（Vue 渲染）
+   S.nodes                          删除，改 S.n（句数）；节点由 Vue 渲染，滚动时按 .line 下标取
+   poll / bufferedEnd / totalDuration / locate / update   原样（S.nodes.length → S.n）
+   setCurrent                       原样语义；className 循环改为写 V.idx（已读/当前/未读由模板绑定）
+   renderStatus                     原样（S.nodes.length → S.n）
+   onUserScroll / maybeScroll       原样；maybeScroll 在 Vue.nextTick 后取 .line[idx] 再居中
+   showReader / showEditor          原样；reader.hidden 改为 V.readingView（v-show），textarea 仍由内核切换；
+                                    富数据在开播前即可显示阅读视图（v2 需开播后）
+   sessionMatches/setBtn/refreshUI  原样
+   hlsWanted/loadHlsLib/attachHls   原样（桌面 Chrome 走 /hls.min.js）
+   startReading/onPlayActivate/toggleAudio/autoArmed      原样（含 iOS 自动播放被拦后点按从头重播）
+   rewindOnce（原生 HLS 起播纠正）   原样
+   结束看门狗（webOS）               原样
+   NAV/findNext/openSelect/keydown  原样；NAV 扩充「假名」「译」两个开关，Enter 同按钮处理
+   setSelect/focusPlay/传参入口      原样；?s= 改取 /v3/t/<id>（失败再退 /t/<id>）；显示标题＋保存者
+   新增                             seekToLine（点句跳转，按 cum/W×总时长估算，不引入时间轴）、
+                                    pendingSeek（未开播时点句：开播后再跳）、两个开关与 localStorage、
+                                    ruby 拼装 rubyHtml()、简易模式标注
+
+【二、与 v2 的差异】
+   1. 同页上卡下列：上方固定当前句卡片（原文大字＋ruby 假名＋句下中文译文，左侧细色条、0.68 倍字号；
+      不做词性色下划线），下方小字全文列表（每句原文＋译文，当前句高亮并自动滚动；段落 para 变化处留空行）。
+   2. 点列表任意句跳转播放（未开播则开播后跳）。
+   3. 开关「假名」（开/关 ruby）与「译」（显示 → 模糊 → 隐藏 循环）；默认 假名=开、译=显示；
+      localStorage 键：ttsv3.kana（"1"/"0"）、ttsv3.tr（"show"/"blur"/"hide"）。
+      模糊口径（卡片与列表联动、取最简单一致）：揭开状态按句号记在同一张表里，点卡片或列表任一处
+      揭开该句，两处同时显示；切换「译」状态或新开会话时清空揭开记录。模糊态下点列表译文=揭开，
+      不触发跳转；点原文=跳转。
+   4. 降级：/v3/t 无 sentences（SQLite 兜底旧文）或 ?text= 入口、或改过文本 → 简易模式：v2 客户端分句、
+      无注音无译文，页面顶部小字「简易模式」；开关隐藏。
+   5. 标题下显示保存者（added_by）。
+   ruby 拼装：token 有 ruby 段（入库算好的送假名拆分）→ 只给带读音的段加 <ruby>；无 ruby 段但 r 非空且含
+      汉字/数字（数字合并 token 整串读音）→ 整 token 注音；其余（假名/标点/空白/拉丁）原样。全部 HTML 转义。
+      每个 token 包 span.tok（nowrap，只在词间换行）。
+
+【三、响应式与遥控】沿用 v2 断点（<1000 单列、≥1000 按钮同排、≥1280 电视限宽 1200px）与焦点样式；
+   卡片原文：手机 clamp(22px,6vw,28px)、电视 clamp(40px,3vw,56px)；列表：手机 clamp(15px,3.8vw,17px)、
+   电视 clamp(24px,1.8vw,32px)。遥控：方向键空间导航含两个开关；其余同 v2。
+
+【四、P4b 选文（Layout 规划，2026-11-19）】
+   入口：#app 顶部页头一行 = 当前标题（无则「未选文章」）＋右侧「☰ 选文」按钮，常驻可见（含裸 /v3）。
+   形态：原位面板（不用浮层/抽屉）——打开时面板占用「卡片＋全文」的位置（高度＝两者之和），卡片、全文
+         与编辑框暂时收起；关闭（「× 返回」/ Esc / webOS 返回键 461）后原样恢复并把当前句滚回可见。
+         理由：手机上不遮挡、不需要额外的关闭手势；电视上焦点只在一个平面内上下移动，空间导航最简单。
+   播放：打开/关闭面板不碰 audio 与会话（只改 V.pickOpen 与编辑框 hidden），播放继续；
+         只有选中一篇且该篇数据取到后，才 stopSession() 停旧会话 → applyItem() 装新篇 → startReading(true)。
+         取不到新篇：面板内提示，旧篇不受影响。连续快速点选以最后一次为准（switchSeq）。
+   列表项：原生 <button>（确定键直接可用）；主行=标题；副行=「N 句 · YYYY-MM-DD HH:MM · 保存者」，
+         非日语再加语言；当前篇加「当前」字样并高亮。排序：入库时间倒序（新入库的材料最常被打开）。
+         数据来自 GET /v3/articles（免令牌，只含公开字段与 ready 文章；见 P4b_report）。
+   焦点序：NAV = 假名、译、选文、返回、播放、语言、语速、编辑、编辑框、全文、audio ＋ 动态 .pick-item
+         （2026-11-19 布局调整：假名/译开关挪到应用标题行右侧、紧凑样式，焦点序随之排到最前，先于选文）
+         （navEls() 每次按当前 DOM 取，隐藏者由 isShown 过滤）。打开面板 → 焦点到“当前篇”或第一篇；
+         关闭 → 焦点回「选文」；选中 → 焦点回播放键。
+   裸 /v3：页头显示「未选文章」，面板自动展开、焦点落在第一篇（一按确定即开读）；默认文本仍在编辑框里，
+         关闭面板即可照 v2 方式朗读。
+   切换时重置：当前句、逐句揭示表、滚动位置、富数据/简易模式标记；保留：假名/译开关（全局偏好）、
+         语言/语速按新篇的设置（同 ?s= 入口）。地址栏用 history.replaceState 同步 ?s=<share_id>。
+   列表口不可达：面板显示「选文列表暂不可用（原因），当前文章照常播放」，其余功能不受影响。
+
+【五、P4c 当前句卡片长句适配（2026-11-19）】
+   问题：卡片原为固定高（38/40vh）＋内滚，长句末行与译文被切；len-l 只缩 0.86 倍不够。
+   存量量化（5 篇 80 句）：原文中位 15 字、p90 40、最长 69 字（75666a9829#6，kana 80，译文 62 字）；
+         北海道#9 68 字（kana 95，译文 55）；对白两篇最长 ≤28 字。
+   候选与取舍：
+     ① 逐句动态字号：能放下，但字号逐句跳变，跟读时突兀 → 只留作“下限仍放不下”的单句兜底；
+     ② 卡片高度逐句自适应：每换一句下方列表上下跳 → 否；改为“按篇恒定的高度”（见⑥）；
+     ③ 卡片内按进度自动滚动：时间轴已推迟，句内进度只能估算，滚动反而分散注意力、译文晚露 → 否；
+     ④ 长句二次断行展示：不降低总高度，且易被理解为改切分 → 否；
+     ⑤ 调整译文位置/占比：手机宽度下解决不了原文本身行数多的问题 → 否（译文仍 0.68 倍）；
+     ⑥ 采用组合——按篇量测、篇内恒定：装入一篇时在离屏量测盒（与卡片同宽同样式）渲染全篇每句，
+        二分取“最高句也放得进卡片上限”的最大整数字号 f（不低于下限），卡片高 = 最高句在 f 下的实需，
+        列表高 = 总预算 − 卡片高（总预算 = 原 --card-h + --list-h，故整页版面不变）。
+        篇内各句共用 f 与卡片高 → 连播跨句卡片与列表零位移；只在换篇、旋转/缩放、假名开关、译显隐变化时重算。
+   参数：总预算 手机 68vh、≥1000px 74vh；列表最少 180px（≥1000px 另不少于 20vh）；卡片最少 120px；
+        字号下限 手机 19px（rt=9.5px，假名仍可辨）、桌面 20px、电视（≥1280）32px（3 米外，对齐 v2 ≥30px 口径）；
+        矮屏兜底顺序：先降到字号下限 → 仍放不下则卡片向列表借高度（列表最少留 110px≈3 行，字号仍篇内恒定）
+        → 仍放不下的极端长句才单句再缩（绝对下限 15px；存量与实测视口均未触发）。
+        实现只用 offsetHeight/getComputedStyle/内联 CSS 变量，不用 :has、容器查询。
+
+【六、P4d 按屏幕方向分布局（2026-11-19）】
+   判定（CSS 媒体查询与 JS matchMedia 同一条件 SPLIT_Q）：
+       横屏左右分栏 ⇔ (min-aspect-ratio: 11/10) and (min-width: 640px)；否则竖屏上下排（= P4c 原样）。
+     · 用宽高比而非 orientation：桌面浏览器窗口无“方向”概念，宽高比对窗口与设备一致可用；
+     · 11/10 而非 1/1：近正方形窗口两种布局都勉强，偏向保持上下排，避免拖窗口时在正方形附近来回翻；
+     · min-width 640：更窄时两栏都太窄（左卡 <370px），上下排更好读。
+     边角归类：桌面窗口拉成竖长（宽<高）→ 上下排（与手机竖屏同理：纵向空间富余）；
+              手机横持（如 740×360）→ 左右分栏（上下排时卡片与列表各只剩一百多 px，几乎不可用；
+              分栏后卡片拿到整列高度）；矮横屏另隐去副标题一行，控件区放到首屏下方（页面可滚）。
+   横屏版面：标题行（应用标题＋假名/译键）、副标题、页头（文章标题＋选文键）整幅在顶，不被分栏切开；
+       其下 .duo 两栏：左朗读卡 60%（flex 3）、右全文列表 40%（flex 2），栏间距 16px（≥1280：24px）；
+       .wrap 横屏放宽到 1600px。两栏等高 = 列高：视口高 − 朗读区顶 − 下方状态行/控件区/audio；
+       若留位后列高 < max(360px, 0.45×视口高)（手机横持、720p 电视等矮横屏），则不给控件留位——控件在首屏下方，
+       遥控下键聚焦时页面自动滚到。用 flex 与 margin，不用 grid / flex gap（webOS 4.x = Chromium 53）。
+       量测宽度扣除常规滚动条宽（防 overflow-y:auto 滚动条出现→变窄→多折行的“自锁”溢出；浮层滚动条设备为 0）。
+   P4c 量测：横屏时量测宽度取左栏卡片实际宽度，上限 = 列高（无列表可借，卡片恒占满列高）；
+       字号仍按篇恒定（二分）、单句兜底照旧；横竖切换由 resize/orientationchange/matchMedia change 触发同一重算。
+   选文面板：横屏仍原位展开、不浮层——整幅替代两栏（高度 = 列高），开合不触碰播放（同 P4b）。
+   遥控（空间导航 findNext 本按几何位置工作，横屏无需另写规则）：
+       横屏时左栏朗读卡加入焦点目标（tabindex=0，确定键＝揭开当前句模糊译文；竖屏不加入，焦点序不变）；
+       左右键：朗读卡 ⇄ 全文列表（同一行内互跳）；上键：回到页头（选文/假名/译，取水平最近者）；
+       下键：到下方控件（播放键等）。每栏只有一个焦点目标，故不需要焦点记忆。
+
+【七、P4e 观感修复（2026-11-19，截图验收）】
+   ① 页头被压：根因是全文列表的焦点样式——通用规则给 .reader:focus 加 scale(1.01)＋外偏描边＋12/16px 黄色外光环
+      ＋z-index:2；触碰/滚动列表即聚焦，装饰从列表上沿外溢约 20px，而列表顶与页头仅 6px 间隙，黄色光环压住「选文」键。
+      （box-shadow 不参与命中检测，DOM 量测查不出，截图可见。）改法：列表与横屏朗读卡焦点改为“内收”——描边负偏移、
+      光环 inset、不放大、不抬层级，装饰全在框内。
+   ② 横屏右栏字太大：右栏 --fs-list 单设——<1280 为 clamp(13px,1.35vw,15px)，电视 ≥1280 为 clamp(18px,1.15vw,22px)，
+      约为左卡的 0.4–0.55 倍；全文行排版收紧（日文行高 1.75、译文 .85em／1.4）。
+   ③ 竖屏：同样收紧行排版；列表高度至少延伸到首屏底部（卡片 P4c 量测不变），首屏能看到更多句。
+   左卡字号逻辑（P4c 按篇量测）不动——问题不在左卡，且其全显指标已由 P4c/P4d 量测保证。
+
+【八、P4f 页头小改（2026-11-19，截图验收）】
+   ① 标题两行并一行：「微软 TTS 流式朗读 · 跟读版 v3」（v3 标识保留，「· 跟读版 v3」为 0.72 倍灰字），删副标题段；
+      字号 手机 18px／≥600 20px／电视 30px；不换行、放不下省略截断。省出的高度经现行量测路径自动让给正文
+      （横屏列高、竖屏列表延伸到首屏底都按实际页头位置计算，无需改量测代码）。
+   ② 横屏假名/译两键放大到与「选文」键同规格：桌面 16px、高 44px、内边距 4px 14px；电视 26px、高 64px、6px 22px。
+      竖屏维持 13.5px/34px。横屏页头三键焦点不放大、无外光环，改深色描边＋浅黄底（「选文」键尺寸未动，只统一了焦点样式）。
+================================================================================
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>微软 TTS 流式朗读 · 跟读版 v3</title>
+<style>
+  :root {
+    --bg: #f7f5f0; --paper: #fffdf8; --ink: #1b1b1b; --muted: #5a554c; --line-done: #8a857c;
+    --brand: #1f5a99; --brand-dark: #163f6b; --hl: #ffe07a; --focus-ring: #0b1b33; --focus-halo: #ffc800;
+    --tr-bar: #9bb7d6;
+    --card-h: 38vh; --list-h: 30vh;
+    --fs-card: clamp(22px, 6vw, 28px);
+    --fs-list: clamp(15px, 3.8vw, 17px);
+  }
+  * { box-sizing: border-box; }
+  [hidden], [v-cloak] { display: none !important; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "Helvetica Neue", "PingFang SC", "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+                 "Microsoft YaHei", "Yu Gothic", "Noto Sans CJK SC", sans-serif;
+    font-size: 17px; line-height: 1.6;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 14px 14px 28px; }
+  h1 { font-size: 22px; margin: 4px 0 2px; letter-spacing: .02em; }
+  .sub { margin: 0 0 10px; color: var(--muted); font-size: 14px; }
+  .share-title { margin: 0 0 4px; font-size: 19px; font-weight: 700; }
+  .saver { font-weight: 400; color: var(--muted); font-size: .8em; }
+  .mode-tag { margin: 0 0 6px; color: var(--muted); font-size: 13px; }
+
+  /* ---------- P4b 页头与选文面板 ---------- */
+  .headrow { display: flex; align-items: center; gap: 10px; margin: 0 0 6px; }
+  .headrow .share-title { flex: 1 1 auto; margin: 0; min-width: 0; }
+  .pick-btn { flex: 0 0 auto; }
+  .picker {
+    height: calc(var(--card-h) + var(--list-h) + 10px); min-height: 380px;
+    border: 2px solid var(--brand); border-radius: 12px; background: var(--paper);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .picker-head { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+                 padding: 8px 10px; border-bottom: 1px solid #e3ddd0; }
+  .picker-title { font-weight: 700; }
+  .picker-msg { margin: 12px 14px; color: var(--muted); }
+  .picker-msg.err { color: #9a2b1b; }
+  .pick-list { overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 6px; }
+  .pick-item {
+    display: block; width: 100%; text-align: left; margin: 0 0 6px; padding: 10px 12px;
+    font: inherit; color: var(--ink); background: #fff; border: 2px solid #ddd5c6; border-radius: 10px;
+    cursor: pointer; touch-action: manipulation;
+  }
+  .pick-item.current { border-color: var(--brand); background: #eef4fb; }
+  .pi-title { display: block; font-weight: 700; font-size: 17px; line-height: 1.4; }
+  .pi-meta { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+  /* ---------- 当前句卡片 ---------- */
+  .card {
+    height: var(--card-h); min-height: 200px; overflow-y: auto;
+    border: 2px solid #cbc4b6; border-radius: 12px; background: var(--paper);
+    padding: 14px 16px 10px; margin-bottom: 10px;
+    display: flex; flex-direction: column;
+  }
+  /* P4c：字号由按篇量测的 --cfs 决定（篇内恒定）；未量测前回落 --fs-card。原 len-l 逐句 0.86 倍档已取消（逐句跳字号）。 */
+  .card-ja { font-size: var(--cfs, var(--fs-card)); line-height: 2.3; font-weight: 600; flex: 0 0 auto; }
+  .card-tr { font-size: calc(var(--cfs, var(--fs-card)) * .68); }
+  .card-tools { display: flex; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+  .tog {
+    font: inherit; font-size: 16px; min-height: 44px; padding: 4px 14px;
+    border-radius: 10px; border: 2px solid var(--brand); background: #fff; color: var(--brand);
+    font-weight: 600; cursor: pointer; touch-action: manipulation;
+  }
+  .tog[aria-pressed="false"] { color: var(--muted); border-color: #aaa294; }
+  /* 标题行内的假名/译开关（2026-11-19 布局调整：从卡片内挪到标题旁，紧凑样式） */
+  .app-title { display: flex; align-items: center; gap: 10px; }
+  .app-title-text { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .title-togs { display: flex; gap: 8px; flex: none; }
+  .title-togs .tog { font-size: 13.5px; min-height: 34px; padding: 2px 10px; border-radius: 8px; }
+  .tok { white-space: nowrap; }
+  rt { font-size: .5em; line-height: 1; font-weight: 400; color: #444; }
+  .no-kana rt { display: none; }
+  .tr {
+    color: #3a3a3a; border-left: 4px solid var(--tr-bar); padding-left: .5em; margin-top: .25em;
+    line-height: 1.55; transition: filter .2s;
+  }
+  .tr.blur { filter: blur(6px); cursor: pointer; user-select: none; }
+
+  /* ---------- 小字全文列表 ---------- */
+  #text, .reader {
+    display: block; width: 100%; height: var(--list-h); min-height: 180px;
+    border: 2px solid #cbc4b6; border-radius: 12px; background: var(--paper); color: var(--ink);
+  }
+  #text { font: inherit; font-size: 17px; line-height: 1.7; padding: 12px 14px; resize: vertical; height: 52vh; }
+  .reader { position: relative; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+            padding: 8px 8px calc(var(--list-h) * .3); }
+  .line { margin: 0 0 .25em; padding: .2em .5em; border-radius: 8px; font-size: var(--fs-list); line-height: 1.45;
+          cursor: pointer; transition: background-color .25s, color .25s; }
+  .line .ja { line-height: 1.9; }
+  .line .tr { font-size: .9em; border-left-width: 3px; }
+  .line.gap { margin-top: 1.1em; }
+  .line.done { color: var(--line-done); }
+  .line.done .tr { color: var(--line-done); }
+  .line.cur { background: var(--hl); color: #000; box-shadow: inset 5px 0 0 var(--brand); }
+  .status { margin: 6px 2px 0; min-height: 1.4em; color: var(--muted); font-size: 14px; }
+
+  /* ---------- 控件（同 v2） ---------- */
+  .controls { display: flex; flex-direction: column; gap: 12px; margin: 14px 0 10px; }
+  .play {
+    width: 100%; min-height: 72px; padding: 10px 20px;
+    display: flex; align-items: center; justify-content: center; gap: .45em;
+    border: none; border-radius: 14px; background: var(--brand); color: #fff;
+    font: inherit; font-size: clamp(24px, 6.5vw, 30px); font-weight: 700;
+    cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+  }
+  .play .ico { font-size: 1.05em; line-height: 1; min-width: 1em; text-align: center; }
+  .play:hover, .play.is-playing { background: var(--brand-dark); }
+  .play[aria-busy="true"] { opacity: .8; cursor: progress; }
+  .opts { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
+  .field { display: flex; align-items: center; gap: 8px; flex: 1 1 40%; font-size: 17px; white-space: nowrap; }
+  .field select { flex: 1 1 auto; min-width: 0; }
+  select, .ghost {
+    font: inherit; font-size: 18px; min-height: 52px; padding: 6px 12px;
+    border-radius: 10px; border: 2px solid #aaa294; background: #fff; color: var(--ink);
+  }
+  .ghost { flex: 1 1 100%; border-color: var(--brand); color: var(--brand); font-weight: 600; cursor: pointer; touch-action: manipulation; }
+  audio { display: block; width: 100%; margin-top: 4px; border-radius: 10px; }
+  .note { color: #5f5a52; font-size: 14px; line-height: 1.7; margin-top: 16px; }
+
+  button, select, textarea, .reader, audio { transition: transform .12s ease, box-shadow .12s ease; }
+  /* 列表项在滚动区内：不放大、描边内收，避免被 overflow 裁掉；用底色加强焦点可见度 */
+  .pick-item:focus, .pick-item:focus-visible {
+    transform: none; outline: 5px solid var(--focus-ring); outline-offset: -5px;
+    box-shadow: none; background: #fff3c4;
+  }
+  button:focus, button:focus-visible, select:focus, select:focus-visible,
+  textarea:focus, textarea:focus-visible, .reader:focus, .reader:focus-visible,
+  audio:focus, audio:focus-visible {
+    outline: 5px solid var(--focus-ring); outline-offset: 3px;
+    box-shadow: 0 0 0 12px var(--focus-halo); position: relative; z-index: 2; transform: scale(1.03);
+  }
+  textarea:focus, textarea:focus-visible, .reader:focus, .reader:focus-visible { transform: scale(1.01); }
+
+  @media (min-width: 600px) {
+    body { font-size: 18px; }
+    .wrap { padding: 20px 22px 32px; }
+    h1 { font-size: 26px; }
+    .ghost { flex: 0 0 auto; }
+  }
+  @media (min-width: 1000px) {
+    :root { --card-h: 40vh; --list-h: 34vh; }
+    .controls { flex-direction: row; align-items: stretch; }
+    .play { flex: 1 1 auto; width: auto; }
+    .opts { flex: 0 0 auto; flex-wrap: nowrap; }
+    .field { flex: 0 0 auto; }
+  }
+  @media (min-width: 1280px) {
+    :root { --fs-card: clamp(40px, 3vw, 56px); --fs-list: clamp(24px, 1.8vw, 32px); }
+    body { font-size: 26px; }
+    .wrap { max-width: 1200px; padding: 30px 40px 48px; }
+    h1 { font-size: 42px; }
+    .sub { font-size: 24px; margin-bottom: 18px; }
+    .share-title { font-size: 30px; }
+    .mode-tag { font-size: 20px; }
+    .card, #text, .reader { border-width: 3px; border-radius: 18px; }
+    .card { padding: 20px 26px 14px; }
+    #text { font-size: 30px; line-height: 1.8; padding: 18px 24px; }
+    .tog { font-size: 26px; min-height: 64px; padding: 6px 22px; border-width: 3px; }
+    .picker { border-width: 3px; border-radius: 18px; }
+    .pick-item { padding: 16px 20px; border-width: 3px; border-radius: 14px; margin-bottom: 10px; }
+    .pi-title { font-size: 30px; }
+    .pi-meta { font-size: 22px; }
+    .status { font-size: 22px; }
+    .controls { gap: 22px; margin: 22px 0 14px; }
+    .play { min-height: 104px; font-size: 40px; border-radius: 18px; }
+    .field { font-size: 28px; gap: 12px; }
+    select, .ghost { font-size: 30px; min-height: 80px; padding: 8px 20px; border-width: 3px; border-radius: 14px; }
+    audio { height: 64px; }
+    .note { font-size: 22px; }
+    button:focus, button:focus-visible, select:focus, select:focus-visible,
+    textarea:focus, textarea:focus-visible, .reader:focus, .reader:focus-visible,
+    audio:focus, audio:focus-visible { outline-width: 7px; outline-offset: 4px; box-shadow: 0 0 0 16px var(--focus-halo); }
+  }
+  /* ---------- P4d 横屏左右分栏（判定见文件头【六】；与 JS 的 SPLIT_Q 必须同一条件） ----------
+     用 flex 不用 grid（webOS 4.x 为 Chromium 53，不支持 grid）；间距用 margin 不用 gap（旧 Chromium 无 flex gap）。 */
+  @media (min-aspect-ratio: 11/10) and (min-width: 640px) {
+    .wrap { max-width: 1600px; }
+    .duo { display: flex; align-items: flex-start; }
+    .duo > .card { flex: 3 1 0; min-width: 0; width: auto; margin-bottom: 0; }
+    .duo > .reader { flex: 2 1 0; min-width: 0; width: auto; margin-left: 16px; }
+    .card:focus, .card:focus-visible {
+      outline: 5px solid var(--focus-ring); outline-offset: 3px; box-shadow: 0 0 0 12px var(--focus-halo);
+    }
+  }
+  @media (min-aspect-ratio: 11/10) and (min-width: 640px) and (max-height: 520px) {
+    .sub { display: none; }                          /* 手机横持等矮横屏：省下副标题一行给朗读区 */
+  }
+  @media (min-aspect-ratio: 11/10) and (min-width: 1280px) {
+    .duo > .reader { margin-left: 24px; }
+    .card:focus, .card:focus-visible { outline-width: 7px; outline-offset: 4px; box-shadow: 0 0 0 16px var(--focus-halo); }
+  }
+  /* ---------- P4e 观感修复（权衡见文件头【七】） ----------
+     ① 全文列表与横屏朗读卡的焦点样式内收：原通用焦点样式（scale(1.01)＋外偏描边＋12/16px 黄色外光环＋z-index:2）
+        会从列表上沿溢出约 20px，压住紧邻其上的页头「选文」键（栏顶与页头仅 6px 间隙）。改为描边内偏、光环 inset、
+        不放大、不抬层级——装饰全在框内，页头在任何滚动/聚焦状态下不被压。
+     ② 全文行排版收紧（双布局）：日文行高 1.9→1.75、译文 .9em→.85em／行高 1.4，行距与内边距略减。
+     ③ 横屏右栏字号单设，明显小于左卡（桌面 ≈ 左卡 0.5 倍）：<1280 为 13–15px，电视 ≥1280 为 18–22px。 */
+  .reader:focus, .reader:focus-visible {
+    transform: none; z-index: auto; outline-offset: -5px; box-shadow: inset 0 0 0 9px var(--focus-halo);
+  }
+  @media (max-width: 999px) { :root { --fs-list: clamp(14px, 3.8vw, 16px); } }   /* 手机/平板竖屏 15–17px → 14–16px（360 宽时 14px）；横屏由下方分栏规则覆盖 */
+  .line { margin: 0 0 .2em; padding: .15em .45em; }
+  .line .ja { line-height: 1.75; }
+  .line .tr { font-size: .85em; line-height: 1.4; margin-top: .1em; }
+  @media (min-width: 1280px) {
+    .reader:focus, .reader:focus-visible { outline-width: 7px; outline-offset: -7px; box-shadow: inset 0 0 0 13px var(--focus-halo); }
+  }
+  @media (min-aspect-ratio: 11/10) and (min-width: 640px) {
+    :root { --fs-list: clamp(13px, 1.35vw, 15px); }
+    .card:focus, .card:focus-visible {
+      transform: none; z-index: auto; outline-offset: -5px; box-shadow: inset 0 0 0 9px var(--focus-halo);
+    }
+  }
+  @media (min-aspect-ratio: 11/10) and (min-width: 1280px) {
+    :root { --fs-list: clamp(18px, 1.15vw, 22px); }
+    .card:focus, .card:focus-visible { outline-width: 7px; outline-offset: -7px; box-shadow: inset 0 0 0 13px var(--focus-halo); }
+  }
+  /* ---------- P4f 页头小改（见文件头【八】） ----------
+     ① 标题并一行：主标题＋小号「· 跟读版 v3」，原副标题段删除；不换行、放不下省略截断（.app-title-text 已有
+        nowrap＋ellipsis）。字号：手机 18px、≥600 20px、电视 ≥1280 30px（原 22/26/42px＋另一行副标题 14/18/24px）。
+     ② 横屏假名/译两键放大到与「选文」键同规格（桌面 16px/高 44px/内边距 4px 14px；电视 26px/高 64px/6px 22px/描边 3px）；
+        竖屏维持 13.5px/34px 紧凑样式不变。横屏页头三键焦点：不放大、不加外光环（P4e 内收口径），改为深色描边
+        （桌面 4px 外偏 2px、电视 6px 外偏 3px，小于键间距与行距，不压邻键/下一行）＋浅黄底色，遥控下醒目。 */
+  .app-title { font-size: 18px; margin: 2px 0 8px; }
+  .app-title .t-sub { font-size: .72em; font-weight: 400; color: var(--muted); letter-spacing: 0; }
+  /* 省略只作用在主标题上，「v3」标识始终保留；<400px 时副标题缩为「· v3」 */
+  .app-title-text { display: flex; align-items: baseline; }
+  .app-title .t-main { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .app-title .t-sub { flex: none; white-space: nowrap; }
+  @media (max-width: 399px) { .app-title .t-sub-long { display: none; } }
+  @media (min-width: 600px) { .app-title { font-size: 20px; } }
+  @media (min-width: 1280px) { .app-title { font-size: 30px; margin-bottom: 12px; } }
+  @media (min-aspect-ratio: 11/10) and (min-width: 640px) {
+    .title-togs { gap: 12px; }
+    .title-togs .tog { font-size: 16px; min-height: 44px; padding: 4px 14px; border-radius: 10px; }
+    .title-togs .tog:focus, .title-togs .tog:focus-visible, #pickBtn:focus, #pickBtn:focus-visible {
+      transform: none; z-index: auto; box-shadow: none;
+      outline: 4px solid var(--focus-ring); outline-offset: 2px; background: #fff3c4;
+    }
+  }
+  @media (min-aspect-ratio: 11/10) and (min-width: 640px) and (max-height: 520px) {
+    /* 手机横持等矮横屏：两键维持紧凑尺寸，避免标题行变高挤掉朗读区（实测 740×360 列高 230→224、最长句 17→16px） */
+    .title-togs { gap: 8px; }
+    .title-togs .tog { font-size: 13.5px; min-height: 34px; padding: 2px 10px; border-radius: 8px; }
+  }
+  @media (min-aspect-ratio: 11/10) and (min-width: 1280px) {
+    .title-togs { gap: 16px; }
+    .title-togs .tog { font-size: 26px; min-height: 64px; padding: 6px 22px; border-width: 3px; border-radius: 14px; }
+    .title-togs .tog:focus, .title-togs .tog:focus-visible, #pickBtn:focus, #pickBtn:focus-visible {
+      outline-width: 6px; outline-offset: 3px;
+    }
+    .headrow { margin-bottom: 12px; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <section class="stage">
+    <!-- Vue 挂载点：只接管声明式渲染（标题、卡片、句子列表、开关状态） -->
+    <div id="app" v-cloak>
+      <!-- 应用标题行：标题＋假名/译开关（2026-11-19 布局调整，开关自卡片内挪来；须在 #app 内以保 Vue 绑定） -->
+      <h1 class="app-title"><span class="app-title-text"><span class="t-main">微软 TTS 流式朗读</span><span class="t-sub">&nbsp;· <span class="t-sub-long">跟读版 </span>v3</span></span><span class="title-togs"><button id="kanaBtn" class="tog" type="button" :aria-pressed="showKana ? 'true' : 'false'"
+                  @click="toggleKana">假名：{{ showKana ? '开' : '关' }}</button><button id="trBtn" class="tog" type="button" :aria-pressed="trMode !== 'hide' ? 'true' : 'false'"
+                  @click="cycleTr">译：{{ TR_LABEL[trMode] }}</button></span></h1>
+      <!-- P4b 页头：标题＋选文入口（入口常驻，裸 /v3 同样可见） -->
+      <div class="headrow">
+        <p class="share-title">
+          <template v-if="title">{{ title }}<span class="saver" v-if="savedBy"> · {{ savedBy }} 保存</span></template>
+          <span class="saver" v-else>未选文章</span>
+        </p>
+        <button id="pickBtn" class="tog pick-btn" type="button" :aria-expanded="pickOpen ? 'true' : 'false'"
+                aria-controls="picker" @click="togglePicker">☰ 选文</button>
+      </div>
+      <p class="mode-tag" v-if="simple && (lines.length || simpleNote) && !pickOpen">简易模式（无注音/译文）</p>
+
+      <!-- P4b 选文面板：原位展开，替代卡片＋全文的位置；打开/关闭都不触碰播放 -->
+      <div id="picker" class="picker" v-show="pickOpen" role="region" aria-label="选择文章"
+           :style="fit.pickH ? { height: fit.pickH + 'px', minHeight: '0px' } : null">
+        <div class="picker-head">
+          <span class="picker-title">选择文章<span class="saver" v-if="pickState === 'ok'">（{{ articles.length }} 篇）</span></span>
+          <button id="pickClose" class="tog" type="button" @click="closePicker">× 返回</button>
+        </div>
+        <p class="picker-msg" v-if="pickState === 'loading'">加载中…</p>
+        <p class="picker-msg err" v-else-if="pickState === 'error'">选文列表暂不可用（{{ pickErr }}），当前文章照常播放。</p>
+        <p class="picker-msg" v-else-if="pickState === 'ok' && !articles.length">暂无可选文章。</p>
+        <p class="picker-msg err" v-if="pickState === 'ok' && pickErr">{{ pickErr }}</p>
+        <div class="pick-list" v-if="pickState === 'ok'">
+          <button v-for="a in articles" :key="a.share_id" type="button" class="pick-item"
+                  :class="{ current: a.share_id === currentId }" :aria-current="a.share_id === currentId ? 'true' : null"
+                  :data-sid="a.share_id" @click="choose(a.share_id)">
+            <span class="pi-title">{{ a.title || '（无标题）' }}</span>
+            <span class="pi-meta">{{ a.sentences }} 句 · {{ fmtDate(a.added_at) }}<template v-if="a.added_by"> · {{ a.added_by }}</template><template v-if="a.lang && a.lang !== 'ja'"> · {{ a.lang }}</template><template v-if="a.share_id === currentId"> · 当前</template></span>
+          </button>
+        </div>
+      </div>
+
+      <!-- P4d：卡片＋全文的包裹层。竖屏为普通块（版面与 P4c 相同）；横屏为左右两栏（flex）。 -->
+      <div class="duo">
+      <div class="card" v-show="readingView && lines.length && !pickOpen" :tabindex="split ? 0 : null"
+           :aria-label="split ? '当前句（确定键：揭开模糊译文）' : null"
+           :style="fit.cardH ? { height: fit.cardH + 'px', minHeight: '0px', '--cfs': (fit.over[cardIdx] || fit.fs) + 'px' } : null">
+        <div class="card-ja" :class="'len-' + (card.len || 'm')" v-html="card.html"></div>
+        <div class="tr card-tr" v-if="!simple && card.tr && trMode !== 'hide'"
+             :class="{ blur: trMode === 'blur' && !revealed[cardIdx] }" @click="reveal(cardIdx)">{{ card.tr }}</div>
+      </div>
+      <div id="reader" class="reader" tabindex="0" role="region" aria-label="全文跟读（点句跳转；按确定键编辑文本）"
+           v-show="readingView && lines.length && !pickOpen" :style="fit.listH ? { height: fit.listH + 'px', minHeight: '0px' } : null">
+        <div v-for="(ln, i) in lines" :key="i" class="line"
+             :class="{ done: i < idx, cur: i === idx, gap: ln.gap }" :aria-current="i === idx ? 'true' : null"
+             @click="seek(i)">
+          <div class="ja" v-html="ln.html"></div>
+          <div class="tr" v-if="ln.tr && trMode !== 'hide'" :class="{ blur: trMode === 'blur' && !revealed[i] }"
+               @click.stop="onTrClick(i)">{{ ln.tr }}</div>
+        </div>
+      </div>
+      </div><!-- /.duo -->
+    </div>
+<textarea id="text" aria-label="朗读文本" spellcheck="false">大丈夫ですか？
+水…
+起きれますか？
+スポーツ飲料も買ってきました。常温です。
+汗びっしょりです。着替えて布団に入ってください。
+クローゼット開けても構いませんか？
+着替える前に汗ふきましょう。
+アイスチョコとバニラ、どっちがいいですか？
+バニラ。
+薬も置いときますね。
+買い物代金…カバンの中の財布から持っていってください。
+勝手にとっていいんですか？
+森山さんは信用してるんで。あと、今日の分のお給料払うんで。
+分かりました。じゃあ手伝いが必要な時は声かけてください。
+すいません、起こしました？
+いえ。
+熱だいぶ下がったみたいです。体温計持ってくればよかった。
+それじゃあ帰りますね。
+時間の超過分は？
+いりませんよ。ご飯作っただけですし。</textarea>
+    <p id="status" class="status"></p>
+  </section>
+
+  <div class="controls">
+    <button id="play" class="play" type="button" autofocus><span class="ico" aria-hidden="true">&#x25B6;&#xFE0E;</span><span class="lbl">播放</span></button>
+    <div class="opts">
+      <label class="field">语言
+        <select id="lang">
+          <option value="ja" selected>日语（Nanami）</option>
+          <option value="zh">中文（晓晓）</option>
+          <option value="en">英语（Aria）</option>
+        </select>
+      </label>
+      <label class="field">语速
+        <select id="rate">
+          <option value="-20%" selected>80%</option>
+          <option value="+0%">100%</option>
+          <option value="-40%">60%</option>
+        </select>
+      </label>
+      <button id="edit" class="ghost" type="button" hidden>✎ 编辑文本</button>
+    </div>
+  </div>
+
+  <audio id="player" controls preload="none" tabindex="0"></audio>
+  <p class="note">音频由微软 Edge TTS 实时合成，切成小段（HLS 流）边合成边播。点全文里任意一句可跳到该句（按估算定位）。<br>
+  遥控器：方向键移动焦点，确定键操作；在文本框里按返回键（或 Esc）回到播放按钮。</p>
+</main>
+
+<script src="/vue.global.prod.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // ================= Vue：声明式渲染层（状态 V 由下方播放内核写入） =================
+  var LS_KANA = 'ttsv3.kana', LS_TR = 'ttsv3.tr';
+  var TR_MODES = ['show', 'blur', 'hide'];
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* 隐私模式忽略 */ } }
+  var savedTr = lsGet(LS_TR);
+
+  var V = Vue.reactive({
+    lines: [],            // [{text, html, tr, len, gap, kana}]
+    idx: -1,
+    simple: true,         // true=简易模式（无 sentences）
+    simpleNote: false,    // 已确定是简易入口（?text= 或无 sentences 的旧文），用于开播前显示标注
+    readingView: false,
+    title: '', savedBy: '',
+    showKana: lsGet(LS_KANA) !== '0',                                   // 默认 开
+    trMode: TR_MODES.indexOf(savedTr) >= 0 ? savedTr : 'show',          // 默认 显示
+    revealed: {},
+    fit: { fs: 0, cardH: 0, listH: 0, pickH: 0, over: {} },   // P4c 卡片适配结果（0 = 未量测，走 CSS 默认）；pickH 仅横屏
+    split: false,         // P4d 当前是否横屏左右分栏（与 CSS 媒体查询 SPLIT_Q 同源）
+    // P4b 选文
+    pickOpen: false,
+    pickState: 'idle',    // idle | loading | ok | error
+    pickErr: '',
+    articles: [],         // [{share_id, title, sentences, added_at, added_by, lang}]
+    currentId: ''         // 当前文章 share_id（规范 ID；别名打开时由 /v3/t 回填）
+  });
+
+  var app = Vue.createApp({
+    setup: function () {
+      var cardIdx = Vue.computed(function () { return Math.max(V.idx, 0); });
+      var card = Vue.computed(function () { return V.lines[cardIdx.value] || { html: '', tr: '', len: 'm' }; });
+      return Object.assign(Vue.toRefs(V), {
+        TR_LABEL: { show: '显示', blur: '模糊', hide: '隐藏' },
+        cardIdx: cardIdx, card: card,
+        toggleKana: function () { V.showKana = !V.showKana; lsSet(LS_KANA, V.showKana ? '1' : '0'); },
+        cycleTr: function () {
+          V.trMode = TR_MODES[(TR_MODES.indexOf(V.trMode) + 1) % TR_MODES.length];
+          V.revealed = {};
+          lsSet(LS_TR, V.trMode);
+        },
+        reveal: function (i) { if (V.trMode === 'blur') { var r = Object.assign({}, V.revealed); r[i] = true; V.revealed = r; } },
+        onTrClick: function (i) {
+          if (V.trMode === 'blur' && !V.revealed[i]) { var r = Object.assign({}, V.revealed); r[i] = true; V.revealed = r; }
+          else seekToLine(i);
+        },
+        seek: function (i) { seekToLine(i); },
+        // P4b 选文（实现在下方内核区，函数声明提升）
+        togglePicker: function () { if (V.pickOpen) closePicker(true); else openPicker(true); },
+        closePicker: function () { closePicker(true); },
+        choose: function (sid) { selectArticle(sid); },
+        fmtDate: function (iso) {
+          var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(iso || '');
+          return m ? (m[1] + '-' + m[2] + '-' + m[3] + ' ' + m[4] + ':' + m[5]) : '';
+        }
+      });
+    }
+  });
+  app.mount('#app');
+
+  // 假名开关的 no-kana 类必须落在 #app 本体上：Vue 的 in-DOM 模板只编译挂载元素的
+  // 内部 HTML，写在 #app 上的 :class 绑定不会被处理（P4 首版即栽于此，开关点了没反应）。
+  // 故用 watch 把状态同步为 #app 的真实 class，CSS 规则 .no-kana rt 照旧生效。
+  function applyKanaClass() {
+    var el = document.getElementById('app');
+    if (el) el.classList.toggle('no-kana', !V.showKana);
+  }
+  applyKanaClass();
+  Vue.watch(function () { return V.showKana; }, applyKanaClass);
+
+  // ================= P4c 当前句卡片适配：按篇量测、篇内恒定（权衡见文件头【五】） =================
+  // 每篇装入（及视口/假名/译显隐变化）时，在离屏量测盒里以与卡片相同的宽度与样式渲染全篇每一句
+  // （原文 ruby＋译文），取“全篇最高那句”所需高度：
+  //   ① 字号 f = 在 [下限, 基准] 内、能让最高句放进卡片上限的最大整数 px（二分）；
+  //   ② 卡片高 = 最高句在 f 下所需高度（≥ 最小卡片高）；列表高 = 总预算 − 卡片高（总版面不变）；
+  //   ③ 篇内各句共用 f 与卡片高 → 连播跨句卡片与列表零位移；
+  //   ④ 兜底：下限字号仍放不下的极端长句（存量无），仅该句单独再缩（不低于绝对下限）。
+  // 只用 offsetHeight / getComputedStyle / 内联样式，不用 :has、容器查询等新特性（照顾 webOS）。
+  var FIT = { floorPhone: 19, floorDesk: 20, floorTV: 32, hardMin: 15, minCard: 120, minList: 180, listHard: 110, gap: 10 };
+  var fitTimer = null;
+
+  // P4d：横屏分栏判定（与 CSS 媒体查询同一条件，单一来源）
+  var SPLIT_Q = '(min-aspect-ratio: 11/10) and (min-width: 640px)';
+  var splitMq = window.matchMedia ? window.matchMedia(SPLIT_Q) : null;
+  var SPLIT_RATIO = 0.6;                            // 左卡 3 : 右列表 2
+
+  function outerH(el) {
+    if (!el || !el.offsetHeight) return 0;
+    var cs = getComputedStyle(el);
+    return el.offsetHeight + (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0);
+  }
+
+  // 横屏：卡片宽 = 左栏宽；卡片高 = 列表高 = 列高（标题区以下、状态行＋控件区以上的可用高度）。
+  // 视口高 < 600（手机横持）时不给控件区留位（控件在首屏下方，页面可滚），把高度都给朗读区。
+  function splitEnv(w, h, desk, tv) {
+    var duo = document.querySelector('.duo'), card = document.querySelector('.card');
+    var reader = document.getElementById('reader'), picker = document.getElementById('picker');
+    var gap = parseFloat(getComputedStyle(reader).marginLeft) || 16;
+    var colW = card && card.offsetWidth ? card.offsetWidth : Math.floor((duo.clientWidth - gap) * SPLIT_RATIO);
+    var region = (picker && picker.offsetHeight) ? picker : duo;      // 面板打开时 duo 在面板下方，取面板顶
+    var top = region.getBoundingClientRect().top + (window.pageYOffset || 0);
+    // 控件区（状态行＋播放键行＋audio）留在首屏，前提是留位后列高仍 ≥ max(360px, 0.45×视口高)；
+    // 否则（手机横持、720p 电视等矮横屏）不留位：控件在首屏下方，遥控下键聚焦时页面自动滚到，高度全给朗读区。
+    var ctrl = outerH(document.getElementById('status')) + outerH(document.querySelector('.controls')) +
+               outerH(document.getElementById('player'));
+    var withCtrl = Math.round(h - top - ctrl - 12);
+    var colH = withCtrl >= Math.max(360, 0.45 * h) ? withCtrl : Math.round(h - top - 12);
+    colH = Math.max(FIT.minList, colH);
+    return { split: true, width: colW, budget: colH, maxCard: colH, maxCardHard: colH, colH: colH,
+             floor: tv ? FIT.floorTV : (desk ? FIT.floorDesk : FIT.floorPhone) };
+  }
+
+  var sbwCache = null;
+  function scrollbarW() {
+    if (sbwCache === null) {
+      var p = document.createElement('div');
+      p.style.cssText = 'position:absolute;left:-10000px;top:0;width:100px;height:100px;overflow:scroll;visibility:hidden';
+      document.body.appendChild(p);
+      sbwCache = Math.max(0, p.offsetWidth - p.clientWidth);
+      document.body.removeChild(p);
+    }
+    return sbwCache;
+  }
+
+  function fitEnv() {
+    var w = window.innerWidth, h = window.innerHeight;
+    var desk = w >= 1000, tv = w >= 1280;
+    if (splitMq && splitMq.matches) return splitEnv(w, h, desk, tv);
+    var budget = Math.round(h * (desk ? 0.74 : 0.68));               // = 原 --card-h + --list-h（38+30 / 40+34 vh）
+    var minList = Math.max(FIT.minList, desk ? Math.round(h * 0.2) : 0);
+    return { budget: budget, maxCard: Math.max(FIT.minCard, budget - minList - FIT.gap),
+             maxCardHard: Math.max(FIT.minCard, budget - FIT.listHard - FIT.gap),   // 矮屏：向列表借高度的上限
+             floor: tv ? FIT.floorTV : (desk ? FIT.floorDesk : FIT.floorPhone) };
+  }
+
+  function buildMeasureBox(width, lines, withTr) {
+    var box = document.createElement('div');
+    box.className = 'card card-measure' + (V.showKana ? '' : ' no-kana');
+    box.setAttribute('aria-hidden', 'true');
+    box.style.cssText = 'position:absolute;left:-10000px;top:0;visibility:hidden;height:auto;min-height:0;' +
+                        'overflow:visible;display:block;width:' + width + 'px';
+    lines.forEach(function (ln) {
+      var item = document.createElement('div');
+      item.className = 'm-item';
+      item.style.cssText = 'display:block;overflow:hidden';           // 包住内部 margin，量到的就是实占高度
+      var ja = document.createElement('div');
+      ja.className = 'card-ja';
+      ja.innerHTML = ln.html;                                         // 与卡片同一份已转义的 ruby HTML
+      item.appendChild(ja);
+      if (withTr && ln.tr) {
+        var tr = document.createElement('div');
+        tr.className = 'tr card-tr';
+        tr.textContent = ln.tr;
+        item.appendChild(tr);
+      }
+      box.appendChild(item);
+    });
+    document.body.appendChild(box);
+    return box;
+  }
+
+  function measureAt(box, f, chrome) {
+    box.style.setProperty('--cfs', f + 'px');
+    var hs = [], items = box.children;
+    for (var i = 0; i < items.length; i++) hs.push(items[i].offsetHeight + chrome);
+    return hs;
+  }
+
+  function fitCard() {
+    fitTimer = null;
+    var lines = V.lines;
+    var stage = document.querySelector('.stage');
+    V.split = !!(splitMq && splitMq.matches);
+    var width = stage ? stage.clientWidth : 0;
+    if (!lines.length || !width) { V.fit = { fs: 0, cardH: 0, listH: 0, pickH: 0, over: {} }; return; }
+    var env = fitEnv();
+    if (env.split) width = env.width;                // P4d：横屏按左栏（卡片）实际宽度量测
+    // P4d：卡片是 overflow-y:auto，桌面常规滚动条一旦出现会让内容变窄、多折行而“自锁”溢出（双稳态，
+    // tv1920 实测踩到）。量测宽度扣掉滚动条宽（浮层滚动条的手机/电视为 0），保证有无滚动条都放得下。
+    width -= scrollbarW();
+    var withTr = !V.simple && V.trMode !== 'hide';
+    var box = buildMeasureBox(width, lines, withTr);
+    try {
+      var cs = getComputedStyle(box);
+      var chrome = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0) +
+                   (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0) + 2;   // +2 防亚像素取整
+      box.style.removeProperty('--cfs');
+      var base = Math.round(parseFloat(getComputedStyle(box.querySelector('.card-ja')).fontSize) || 22);
+      var floor = Math.min(env.floor, base);
+      var maxOf = function (a) { return Math.max.apply(null, a); };
+      var f = base, hs = measureAt(box, base, chrome);
+      if (maxOf(hs) > env.maxCard) {                                  // 二分：放得下的最大字号
+        var lo = floor, hi = base - 1, best = floor;
+        while (lo <= hi) {
+          var mid = (lo + hi) >> 1;
+          if (maxOf(measureAt(box, mid, chrome)) <= env.maxCard) { best = mid; lo = mid + 1; } else hi = mid - 1;
+        }
+        f = best;
+        hs = measureAt(box, f, chrome);
+      }
+      // 下限字号仍放不下时：先向列表借高度（列表最少保留 listHard，约 3 行），字号仍篇内恒定；
+      // 借到上限还放不下的极端长句（存量无），才单句再缩（不低于 hardMin）。
+      var cap = maxOf(hs) > env.maxCard ? env.maxCardHard : env.maxCard;
+      var over = {};
+      if (maxOf(hs) > cap) {
+        hs.forEach(function (hgt, i) {
+          if (hgt <= cap) return;
+          var item = box.children[i], g = f;
+          while (g > FIT.hardMin) {
+            g--;
+            item.style.setProperty('--cfs', g + 'px');
+            if (item.offsetHeight + chrome <= cap) break;
+          }
+          over[i] = g;
+          hs[i] = Math.min(item.offsetHeight + chrome, cap);
+        });
+      }
+      var cardH = Math.max(FIT.minCard, Math.min(maxOf(hs), cap));
+      var listH = Math.max(FIT.listHard, env.budget - cardH - FIT.gap);
+      if (env.split) {                                // P4d 横屏：左卡与右列表等高 = 列高；面板替双栏、同高
+        cardH = env.colH;
+        listH = env.colH;
+      } else {
+        // P4e 竖屏：列表至少延伸到首屏底部（原只按预算分配，列表下沿常落在首屏外、首屏只露一两句）。
+        // 卡片高与字号（P4c）不变；列表变高只影响列表自身与其下方控件的位置，篇内仍恒定。
+        var duoEl = document.querySelector('.duo'), pk = document.getElementById('picker');
+        var regionEl = (pk && pk.offsetHeight) ? pk : duoEl;
+        var listTop = regionEl.getBoundingClientRect().top + (window.pageYOffset || 0) + cardH + FIT.gap;
+        listH = Math.max(listH, Math.round(window.innerHeight - listTop - 8));
+      }
+      V.fit = { fs: f, cardH: cardH, listH: listH, pickH: env.split ? env.colH : 0, over: over };
+    } finally {
+      document.body.removeChild(box);
+    }
+  }
+
+  function scheduleFit() {
+    if (fitTimer) clearTimeout(fitTimer);
+    fitTimer = setTimeout(function () { Vue.nextTick(fitCard); }, 60);
+  }
+  Vue.watch(function () { return [V.lines, V.showKana, V.trMode === 'hide', V.simple]; }, scheduleFit);
+  window.addEventListener('resize', scheduleFit);
+  window.addEventListener('orientationchange', scheduleFit);
+  if (splitMq) {                                    // 横竖布局切换：走同一重算路径（旧 webOS 只有 addListener）
+    if (splitMq.addEventListener) splitMq.addEventListener('change', scheduleFit);
+    else if (splitMq.addListener) splitMq.addListener(scheduleFit);
+  }
+  if (document.fonts && document.fonts.ready && document.fonts.ready.then) document.fonts.ready.then(scheduleFit);
+
+  // ================= ruby 拼装（toks → 安全 HTML） =================
+  var NEEDS_RUBY_RE = /[㐀-鿿豈-﫿々〆ヶ0-9]/;
+  function esc(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function rb(t, r) { return '<ruby>' + esc(t) + '<rt>' + esc(r) + '</rt></ruby>'; }
+  function rubyHtml(sent) {
+    if (!sent.toks || !sent.toks.length) return esc(sent.text);
+    var out = '';
+    sent.toks.forEach(function (t) {
+      if (t.pd === '空白') { out += esc(t.s); return; }               // 空白放在 span 外，允许在此换行
+      var inner;
+      if (t.ruby && t.ruby.length) {                                  // 入库算好的送假名拆分
+        inner = t.ruby.map(function (g) { return g.r ? rb(g.t, g.r) : esc(g.t); }).join('');
+      } else if (t.r && NEEDS_RUBY_RE.test(t.s)) {                    // 整 token 注音（数字合并 token 等）
+        inner = rb(t.s, t.r);
+      } else {
+        inner = esc(t.s);                                             // 假名/标点/拉丁：原样
+      }
+      out += '<span class="tok">' + inner + '</span>';
+    });
+    return out;
+  }
+  window.__v3_rubyHtml = rubyHtml;   // 供开发验证离线核对（无副作用）
+
+  // ================= 播放内核（自 player_v2 原样移植，差异见文件头对照表） =================
+  var $ = function (id) { return document.getElementById(id); };
+  var audio = $('player');
+  var btn = $('play');
+  var btnIco = btn.querySelector('.ico');
+  var btnLbl = btn.querySelector('.lbl');
+  var textEl = $('text');
+  var langEl = $('lang');
+  var rateEl = $('rate');
+  var editBtn = $('edit');
+  var reader = $('reader');          // Vue 挂载后取（v-show，元素常驻）
+  var kanaBtn = $('kanaBtn');
+  var trBtn = $('trBtn');
+  var pickBtn = $('pickBtn');        // P4b 选文入口（Vue 挂载后取，元素常驻）
+  var pickClose = $('pickClose');
+  var statusEl = $('status');
+
+  // ---------------- 同步参数（同 v2；kcps 为富模式按 kana 计数时的每秒拍数） ----------------
+  var PRIOR = {
+    ja: { cps: 6.5, kcps: 7.5, pause: 0.45 },
+    zh: { cps: 4.6, kcps: 4.6, pause: 0.45 },
+    en: { cps: 12,  kcps: 12,  pause: 0.40 }
+  };
+  var COMMA_PAUSE = 0.2;
+  var ELLIPSIS_PAUSE = 0.35;
+  var POLL_MS = 1500;
+  var USER_SCROLL_PAUSE_MS = 4000;
+  var SPLIT_RE = /[^。！？!?…\n]*[。！？!?…]+[」』）)》〉】"'”’]*|[^。！？!?…\n]+/g;
+  var PUNCT_ONLY_RE = /^[\s。！？!?…」』）)》〉】"'”’]+$/;
+  var STRIP_RE = /[\s。．.！？!?…、，,；;：:「」『』（）()《》〈〉【】"'“”‘’\-—~～・]/g;
+
+  var S = null;
+  var RICH = null;       // 富数据 {text, sentences}（来自 /v3/t/<id>）
+  var busy = false;
+  var readingView = false;
+  var lastActivate = 0;
+  var userScrollUntil = 0;
+  var lastScrolledIdx = -1;
+  var resumeTimer = null;
+  var pendingSeekIdx = -1;
+  var SMOOTH = ('scrollBehavior' in document.documentElement.style) &&
+    !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+  // ---------------- 切句与权重 ----------------
+  function splitSentences(text) {
+    var out = [], m;
+    SPLIT_RE.lastIndex = 0;
+    while ((m = SPLIT_RE.exec(text)) !== null) {
+      var s = m[0].trim();
+      if (!s) continue;
+      if (out.length && PUNCT_ONLY_RE.test(s)) out[out.length - 1] += s;
+      else out.push(s);
+    }
+    return out;
+  }
+
+  function weightOf(s, prior, kana) {
+    var commas = (s.match(/[、，,；;：:]/g) || []).length;
+    var ellipses = (s.match(/…+|\.{3,}/g) || []).length;
+    var base = kana ? kana.replace(STRIP_RE, '').length / prior.kcps
+                    : s.replace(STRIP_RE, '').length / prior.cps;
+    return base + prior.pause + commas * COMMA_PAUSE + ellipses * ELLIPSIS_PAUSE;
+  }
+
+  function speedOf(rate) {
+    var m = /^([+-]?\d+)%$/.exec(rate || '');
+    var v = m ? parseInt(m[1], 10) : 0;
+    return Math.max(0.3, 1 + v / 100);
+  }
+
+  // 句子 → 渲染行（富：带 ruby/译文/段落；简易：纯文本）
+  function linesFromRich(sents) {
+    return sents.map(function (s, i) {
+      return { text: s.text, html: rubyHtml(s), tr: s.tr || '', len: s.len_class || 'm', kana: s.kana || '',
+               gap: i > 0 && s.para !== sents[i - 1].para };
+    });
+  }
+  function linesFromPlain(parts) {
+    return parts.map(function (p) { return { text: p, html: esc(p), tr: '', len: 'm', kana: '', gap: false }; });
+  }
+
+  // ---------------- 会话 ----------------
+  function newSession(text, lang, rate, url) {
+    if (S) clearTimeout(S.pollTimer);
+    var prior = PRIOR[lang] || PRIOR.ja;
+    var rich = !!(RICH && RICH.text === text);
+    var lines = rich ? linesFromRich(RICH.sentences) : linesFromPlain(splitSentences(text));
+    var cum = [0], W = 0;
+    for (var i = 0; i < lines.length; i++) {
+      W += weightOf(lines[i].text, prior, rich ? lines[i].kana : '');
+      cum.push(W);
+    }
+    V.lines = lines;
+    V.simple = !rich;
+    V.idx = -1;
+    V.revealed = {};
+    S = {
+      text: text, lang: lang, rate: rate, url: url,
+      n: lines.length, cum: cum, W: W,
+      estTotal: W / speedOf(rate),
+      plSum: 0, plEnded: false, forceEnded: false, maxT: 0, lastT: -1, plFails: 0,
+      pollTimer: null, idx: -1
+    };
+    lastScrolledIdx = -1;
+    userScrollUntil = 0;
+    showReader();
+    reader.scrollTop = 0;
+    poll(S);
+  }
+
+  function poll(sess) {
+    if (S !== sess || sess.plEnded) return;
+    fetch(sess.url, { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.text();
+      })
+      .then(function (body) {
+        if (S !== sess) return;
+        var sum = 0, re = /#EXTINF:\s*([\d.]+)/g, m;
+        while ((m = re.exec(body)) !== null) sum += parseFloat(m[1]) || 0;
+        sess.plSum = sum;
+        sess.plFails = 0;
+        if (body.indexOf('#EXT-X-ENDLIST') >= 0) sess.plEnded = true;
+        else if (sum > sess.estTotal * 0.95) sess.estTotal = sum * 1.15;
+        update();
+      })
+      .catch(function () { if (S === sess) sess.plFails++; })
+      .then(function () {
+        if (S === sess && !sess.plEnded && sess.plFails < 10) {
+          sess.pollTimer = setTimeout(function () { poll(sess); }, POLL_MS);
+        }
+      });
+  }
+
+  function bufferedEnd() {
+    try {
+      var b = audio.buffered;
+      return b && b.length ? b.end(b.length - 1) : 0;
+    } catch (e) { return 0; }
+  }
+
+  function totalDuration() {
+    var d = audio.duration;
+    var dOk = isFinite(d) && d > 0;
+    if (S.plEnded) return { total: dOk ? d : S.plSum, exact: true };
+    if (dOk && S.plFails >= 3) return { total: d, exact: true };
+    var lower = Math.max(S.plSum, bufferedEnd(), dOk ? d : 0, audio.currentTime || 0);
+    return { total: Math.max(lower, S.estTotal), exact: false };
+  }
+
+  function locate(x) {
+    var lo = 0, hi = S.n - 1;
+    while (lo < hi) {
+      var mid = (lo + hi + 1) >> 1;
+      if (S.cum[mid] <= x) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+  }
+
+  function setCurrent(i) {
+    if (i === S.idx) return;
+    S.idx = i;
+    V.idx = i;                        // v2：逐节点改 className；v3：模板按 idx 绑定 done/cur/aria-current
+  }
+
+  function update() {
+    if (!S || !S.n) return;
+    var n = S.n, i, exact;
+    if (audio.ended || S.forceEnded) {
+      i = n - 1; exact = true;
+    } else {
+      var t = audio.currentTime || 0;
+      if (!audio.getAttribute('src') || (t === 0 && audio.paused && S.idx < 0)) { renderStatus(null); return; }
+      var info = totalDuration();
+      exact = info.exact;
+      var target = info.total > 0 ? Math.min(1, t / info.total) * S.W : 0;
+      i = locate(target);
+    }
+    setCurrent(i);
+    maybeScroll();
+    renderStatus(exact);
+  }
+
+  function renderStatus(exact) {
+    if (!readingView) { statusEl.textContent = ''; return; }
+    if (!S) { statusEl.textContent = V.lines.length ? '共 ' + V.lines.length + ' 句 · 点播放或点任意句开始' : ''; return; }
+    var n = S.n;
+    if (S.idx < 0 || exact === null) { statusEl.textContent = '共 ' + n + ' 句'; return; }
+    var s = '第 ' + (S.idx + 1) + ' / ' + n + ' 句';
+    if (!exact) s += ' · 合成中，进度为估算（已生成 ' + Math.round(S.plSum) + ' 秒）';
+    statusEl.textContent = s;
+  }
+
+  // ---------------- 自动滚动（用户滚动后让行 4 秒） ----------------
+  function onUserScroll() {
+    userScrollUntil = Date.now() + USER_SCROLL_PAUSE_MS;
+    clearTimeout(resumeTimer);
+    resumeTimer = setTimeout(function () { lastScrolledIdx = -1; update(); }, USER_SCROLL_PAUSE_MS + 50);
+  }
+  ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'mousedown'].forEach(function (ev) {
+    reader.addEventListener(ev, onUserScroll, { passive: true });
+  });
+
+  function maybeScroll() {
+    if (!readingView || !S || S.idx < 0) return;
+    if (Date.now() < userScrollUntil) return;
+    if (S.idx === lastScrolledIdx) return;
+    lastScrolledIdx = S.idx;
+    var want = S.idx;
+    Vue.nextTick(function () {
+      var el = reader.querySelectorAll('.line')[want];
+      if (!el) return;
+      var top = Math.max(0, el.offsetTop - (reader.clientHeight - el.offsetHeight) / 2);
+      if (SMOOTH && reader.scrollTo) {
+        try { reader.scrollTo({ top: top, behavior: 'smooth' }); return; } catch (e) { /* 回落 */ }
+      }
+      reader.scrollTop = top;
+    });
+  }
+
+  // ---------------- 点句跳转（新增；按 cum/W × 总时长估算，不引入时间轴） ----------------
+  function seekToLine(i) {
+    if (!S || !audio.getAttribute('src') || !sessionMatches() || audio.ended || (S && S.forceEnded)) {
+      pendingSeekIdx = i;                // 未开播/内容已改/已播完：先开播，起播后再跳
+      V.idx = i;
+      if (!busy) startReading(false);
+      return;
+    }
+    var total = totalDuration().total;
+    var t = total > 0 ? (S.cum[i] / S.W) * total : 0;
+    var avail = Math.max(S.plSum, bufferedEnd());
+    if (!S.plEnded && avail > 0) t = Math.min(t, Math.max(0, avail - 0.5));   // 直播期不越过已生成部分
+    try { audio.currentTime = t + 0.05; } catch (e) { /* 直播窗口不可拖动时忽略 */ }
+    autoArmed = false;                   // 用户已手动操作，不再按“自动播放被拦”从头重播
+    userScrollUntil = 0;
+    lastScrolledIdx = -1;
+    if (audio.paused) { var p = audio.play(); if (p && p.catch) p.catch(function () {}); }
+    update();
+  }
+  audio.addEventListener('playing', function () {
+    if (pendingSeekIdx < 0 || !S) return;
+    var i = pendingSeekIdx;
+    pendingSeekIdx = -1;
+    if (i > 0) setTimeout(function () { seekToLine(i); }, 300);
+  });
+
+  // ---------------- 视图切换 ----------------
+  function showReader() {
+    if (!S && !V.lines.length) return;
+    var hadFocus = document.activeElement === textEl;
+    readingView = true;
+    V.readingView = true;
+    textEl.hidden = true;
+    lastScrolledIdx = -1;
+    if (hadFocus) Vue.nextTick(function () { reader.focus(); });
+    refreshUI();
+    update();
+    renderStatus(null);
+  }
+
+  function showEditor(focusText) {
+    var hadFocus = document.activeElement === reader;
+    readingView = false;
+    V.readingView = false;
+    textEl.hidden = false;
+    if (focusText || hadFocus) textEl.focus();
+    renderStatus(null);
+    refreshUI();
+  }
+
+  // ---------------- 播放按钮（同 v2） ----------------
+  function sessionMatches() {
+    return !!S && S.text === textEl.value.trim() && S.lang === langEl.value && S.rate === rateEl.value;
+  }
+
+  function setBtn(ico, lbl, playing) {
+    btnIco.textContent = ico;
+    btnLbl.textContent = lbl;
+    btn.classList.toggle('is-playing', !!playing);
+  }
+
+  function refreshUI() {
+    if (busy) {
+      btn.setAttribute('aria-busy', 'true');
+      setBtn('⏳︎', '准备中…');
+    } else {
+      btn.removeAttribute('aria-busy');
+      if (!sessionMatches() || !audio.getAttribute('src')) setBtn('▶︎', '播放');
+      else if (audio.ended || (S && S.forceEnded)) setBtn('↻', '重新播放');
+      else if (!audio.paused) setBtn('⏸︎', '暂停', true);
+      else if (audio.currentTime > 0) setBtn('▶︎', '继续');
+      else setBtn('▶︎', '播放');
+    }
+    var showEdit = readingView || sessionMatches() || (!S && V.lines.length > 0);
+    if (!showEdit && document.activeElement === editBtn) btn.focus();
+    editBtn.hidden = !showEdit;
+    editBtn.textContent = readingView ? '✎ 编辑文本' : '☰ 返回跟读';
+  }
+
+  var hlsObj = null, hlsLibPromise = null;
+  function hlsWanted() {
+    var ua = navigator.userAgent || '';
+    return /Chrome\//.test(ua) && !/CriOS|webOS|WebOS|LG Browser|Edg\//.test(ua) && !!window.MediaSource;
+  }
+  function loadHlsLib() {
+    if (window.Hls) return Promise.resolve();
+    if (hlsLibPromise) return hlsLibPromise;
+    hlsLibPromise = new Promise(function (res, rej) {
+      var sc = document.createElement('script');
+      sc.src = '/hls.min.js';
+      sc.onload = res;
+      sc.onerror = rej;
+      document.head.appendChild(sc);
+    });
+    return hlsLibPromise;
+  }
+  function attachHls(url, quiet) {
+    loadHlsLib().then(function () {
+      if (!window.Hls || !Hls.isSupported()) { audio.src = url; var p0 = audio.play(); if (p0 && p0.catch) p0.catch(function () {}); return; }
+      if (hlsObj) { try { hlsObj.destroy(); } catch (e) {} hlsObj = null; }
+      hlsObj = new Hls({ startPosition: 0, liveSyncDurationCount: 1 });
+      hlsObj.loadSource(url);
+      hlsObj.attachMedia(audio);
+      hlsObj.on(Hls.Events.MANIFEST_PARSED, function () {
+        var p = audio.play();
+        if (p && p.catch) p.catch(function (e) { if (!quiet && e && e.name !== 'AbortError') alert('播放失败：' + e.message); });
+      });
+      hlsObj.on(Hls.Events.ERROR, function (evt, data) {
+        if (data && data.fatal) { try { hlsObj.destroy(); } catch (e) {} hlsObj = null; audio.src = url; }
+      });
+    }).catch(function () { audio.src = url; });
+  }
+
+  async function startReading(quiet) {
+    var text = textEl.value.trim();
+    if (!text || busy) return;
+    busy = true;
+    refreshUI();
+    var lang = langEl.value, rate = rateEl.value;
+    try {
+      var resp = await fetch('/play', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text, lang: lang, rate: rate })
+      });
+      var data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+      newSession(text, lang, rate, data.url);
+      autoArmed = !!quiet;
+      if (hlsWanted()) {
+        pendingRewind = false;
+        attachHls(data.url, quiet);
+      } else {
+        pendingRewind = true;
+        audio.src = data.url;
+        await audio.play();
+      }
+    } catch (e) {
+      if (!quiet && !(e && e.name === 'AbortError')) alert('播放失败：' + e.message);
+    }
+    busy = false;
+    refreshUI();
+  }
+
+  function onPlayActivate() {
+    var now = Date.now();
+    if (now - lastActivate < 300 || busy) return;
+    lastActivate = now;
+    if (autoArmed) { autoArmed = false; startReading(false); return; }
+    if (sessionMatches() && audio.getAttribute('src') && !audio.ended && !(S && S.forceEnded)) {
+      if (audio.paused) {
+        showReader();
+        var p = audio.play();
+        if (p && p.catch) {
+          p.catch(function (e) {
+            if (e && e.name === 'AbortError') return;
+            if (e && e.name === 'NotAllowedError') { alert('播放失败：' + e.message); return; }
+            startReading(false);
+          });
+        }
+      } else {
+        audio.pause();
+      }
+    } else {
+      startReading(false);
+    }
+  }
+
+  function toggleAudio() {
+    if (!audio.getAttribute('src')) { onPlayActivate(); return; }
+    if (audio.paused) { var p = audio.play(); if (p && p.catch) p.catch(function () {}); }
+    else audio.pause();
+  }
+
+  btn.addEventListener('click', onPlayActivate);
+  editBtn.addEventListener('click', function () {
+    if (readingView) showEditor(true);
+    else if (sessionMatches() || (!S && V.lines.length)) showReader();
+  });
+  textEl.addEventListener('input', refreshUI);
+  langEl.addEventListener('change', refreshUI);
+  rateEl.addEventListener('change', refreshUI);
+  ['timeupdate', 'seeked', 'durationchange', 'loadedmetadata', 'play', 'playing', 'pause', 'ended', 'emptied']
+    .forEach(function (ev) {
+      audio.addEventListener(ev, function () { update(); refreshUI(); });
+    });
+
+  // 直播型 HLS 起播纠正（同 v2）
+  var pendingRewind = false, autoArmed = false;
+  function rewindOnce(ev) {
+    if (!pendingRewind) return;
+    try {
+      var start = (audio.seekable && audio.seekable.length) ? audio.seekable.start(0) : 0;
+      if ((audio.currentTime || 0) > start + 0.3) {
+        audio.currentTime = start;
+        pendingRewind = false;
+      } else if (ev && ev.type === 'playing') {
+        pendingRewind = false;
+      }
+    } catch (err) { /* 直播窗口不可拖动时忽略，下个事件再试 */ }
+  }
+  ['loadedmetadata', 'playing'].forEach(function (ev) {
+    audio.addEventListener(ev, function (e) { rewindOnce(e); });
+  });
+
+  // 结束看门狗（同 v2，webOS）
+  setInterval(function () {
+    if (!S || !S.plEnded || S.forceEnded || audio.ended || !audio.getAttribute('src')) { if (S) S.lastT = -1; return; }
+    var total = totalDuration().total;
+    var rawT = audio.currentTime;
+    var t = isFinite(rawT) ? rawT : -1;
+    var atEnd = total > 0 && t >= 0 && t >= total - 0.35 && S.lastT >= 0 && Math.abs(t - S.lastT) < 0.01;
+    var nanEnd = total > 0 && t < 0 && S.maxT > total * 0.9;
+    if (atEnd || nanEnd) {
+      S.forceEnded = true;
+      try { audio.pause(); } catch (err) { /* 忽略 */ }
+      update();
+      refreshUI();
+    } else if (t >= 0) {
+      S.lastT = t;
+      if (t > S.maxT) S.maxT = t;
+    }
+  }, 1000);
+
+  // ---------------- 遥控器 / 方向键空间导航（NAV 扩充两个开关） ----------------
+  var NAV = [kanaBtn, trBtn, pickBtn, pickClose, btn, langEl, rateEl, editBtn, textEl, reader, audio];
+  // P4b：选文列表项是动态生成的，空间导航时把当前可见的 .pick-item 一并纳入（不可见者由 isShown 过滤）
+  function navEls() {
+    var els = NAV.concat(Array.prototype.slice.call(document.querySelectorAll('.pick-item')));
+    // P4d：横屏时左栏朗读卡成为焦点目标（与右栏全文左右互跳）；竖屏不纳入，焦点序与 P4c 相同
+    if (V.split) { var c = document.querySelector('.card'); if (c) els.push(c); }
+    return els;
+  }
+
+  function isShown(el) {
+    return !el.hidden && !el.disabled && el.getClientRects().length > 0;
+  }
+
+  function findNext(from, dir) {
+    var a = from.getBoundingClientRect();
+    var acx = (a.left + a.right) / 2, acy = (a.top + a.bottom) / 2;
+    var TOL = 10, best = null, bestScore = Infinity;
+    navEls().forEach(function (el) {
+      if (el === from || !isShown(el)) return;
+      var b = el.getBoundingClientRect();
+      var bcx = (b.left + b.right) / 2, bcy = (b.top + b.bottom) / 2;
+      var primary, secondary;
+      if (dir === 'down' || dir === 'up') {
+        if (dir === 'down' ? b.top < a.bottom - TOL : b.bottom > a.top + TOL) return;
+        primary = dir === 'down' ? b.top - a.bottom : a.top - b.bottom;
+        secondary = Math.abs(bcx - acx);
+      } else {
+        if (dir === 'right' ? b.left < a.right - TOL : b.right > a.left + TOL) return;
+        if (b.bottom <= a.top || b.top >= a.bottom) return;
+        primary = dir === 'right' ? b.left - a.right : a.left - b.right;
+        secondary = Math.abs(bcy - acy);
+      }
+      var score = Math.max(0, primary) + secondary * 2;
+      if (score < bestScore) { bestScore = score; best = el; }
+    });
+    return best;
+  }
+
+  function openSelect(sel) {
+    if (typeof sel.showPicker === 'function') {
+      try { sel.showPicker(); return; } catch (e) { /* 不支持则循环切换 */ }
+    }
+    sel.selectedIndex = (sel.selectedIndex + 1) % sel.options.length;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  var DIRS = { 37: 'left', 38: 'up', 39: 'right', 40: 'down' };
+  var DIR_KEYS = { ArrowLeft: 'left', ArrowUp: 'up', ArrowRight: 'right', ArrowDown: 'down',
+                   Left: 'left', Up: 'up', Right: 'right', Down: 'down' };
+
+  document.addEventListener('keydown', function (e) {
+    var code = e.keyCode, key = e.key, t = document.activeElement;
+    var dir = DIR_KEYS[key] || DIRS[code];
+    var isEnter = code === 13 || key === 'Enter';
+    var isSpace = code === 32 || key === ' ' || key === 'Spacebar';
+
+    if (code === 179 || code === 415 || code === 19 ||
+        key === 'MediaPlayPause' || key === 'MediaPlay' || key === 'MediaPause') {
+      e.preventDefault();
+      onPlayActivate();
+      return;
+    }
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+
+    // P4b：选文面板打开时，Esc / webOS 返回键（461）关闭面板、焦点回「选文」按钮（不影响播放）
+    if (V.pickOpen && t !== textEl && (key === 'Escape' || key === 'Esc' || code === 27 || code === 461)) {
+      e.preventDefault();
+      closePicker(true);
+      return;
+    }
+
+    if (t === textEl) {
+      if (e.shiftKey) return;
+      var len = textEl.value.length;
+      var atStart = textEl.selectionStart === 0 && textEl.selectionEnd === 0;
+      var atEnd = textEl.selectionStart === len && textEl.selectionEnd === len;
+      if ((dir === 'up' && atStart) || (dir === 'down' && atEnd)) {
+        var out = findNext(textEl, dir);
+        if (out) { e.preventDefault(); out.focus(); }
+      } else if (key === 'Escape' || key === 'Esc' || code === 27 || code === 461) {
+        e.preventDefault();
+        btn.focus();
+      }
+      return;
+    }
+
+    if (dir) {
+      if (navEls().indexOf(t) < 0) { e.preventDefault(); btn.focus(); return; }
+      var next = findNext(t, dir);
+      if (next) {
+        e.preventDefault();
+        next.focus();
+      } else if (t === audio && (dir === 'left' || dir === 'right')) {
+        e.preventDefault();
+        try { audio.currentTime = Math.max(0, audio.currentTime + (dir === 'left' ? -5 : 5)); } catch (err) { /* 直播不可拖动时忽略 */ }
+      } else if (t.tagName === 'SELECT' || dir === 'left' || dir === 'right') {
+        e.preventDefault();
+      }
+      return;
+    }
+
+    if (isEnter || isSpace) {
+      if (t === btn || t === editBtn || t === kanaBtn || t === trBtn ||
+          t === pickBtn || t === pickClose || (t && t.classList && t.classList.contains('pick-item'))) {
+        if (isEnter) { e.preventDefault(); if (!e.repeat) t.click(); }
+        return;
+      }
+      if (e.repeat) { e.preventDefault(); return; }
+      if (t === langEl || t === rateEl) { e.preventDefault(); openSelect(t); return; }
+      if (t === audio) { e.preventDefault(); toggleAudio(); return; }
+      if (t === reader) { e.preventDefault(); showEditor(true); return; }
+      if (V.split && t && t.classList && t.classList.contains('card')) {   // P4d：横屏朗读卡——确定键揭开模糊译文
+        e.preventDefault();
+        if (V.trMode === 'blur') { var rv = Object.assign({}, V.revealed); rv[Math.max(V.idx, 0)] = true; V.revealed = rv; }
+        return;
+      }
+    }
+  });
+
+  // ---------------- 传参与自动播放（同 v2；?s= 取 /v3/t 富数据） ----------------
+  function setSelect(sel, v) {
+    if (!v) return;
+    v = String(v);
+    if (sel === rateEl && /^ \d/.test(v)) v = '+' + v.slice(1);
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === v) { sel.value = v; return; }
+    }
+    if (sel === rateEl && /^[+-]\d+%$/.test(v)) {
+      var opt = document.createElement('option');
+      var pct = 100 + parseInt(v, 10);
+      opt.value = v;
+      opt.textContent = '自定义 ' + pct + '%';
+      sel.appendChild(opt);
+      sel.value = v;
+    }
+  }
+
+  function focusPlay() {
+    if (!document.activeElement || document.activeElement === document.body) btn.focus();
+  }
+  btn.focus();
+  window.addEventListener('load', focusPlay);
+  refreshUI();
+
+  async function fetchShare(id) {
+    var r = await fetch('/v3/t/' + encodeURIComponent(id));
+    if (!r.ok && r.status !== 404) r = await fetch('/t/' + encodeURIComponent(id));   // v3 口不可用时退旧口
+    return r.ok ? r.json() : null;
+  }
+
+  // 把一篇文章的数据装进页面（?s= 入口与选文切换共用）。开关（假名/译）是全局偏好，不在此处改动；
+  // 逐句「已揭示」与当前句在此清空，避免串篇。
+  function applyItem(item, sid) {
+    V.title = item.title || '';
+    document.title = (item.title ? item.title + ' · ' : '') + '日语朗读页 v3';
+    V.savedBy = item.added_by || '';
+    V.currentId = item.share_id || sid || '';
+    textEl.value = item.text || '';
+    setSelect(langEl, item.lang);
+    setSelect(rateEl, item.rate);
+    V.idx = -1;
+    V.revealed = {};
+    lastScrolledIdx = -1;
+    userScrollUntil = 0;
+    if (item.sentences && item.sentences.length) {
+      RICH = { text: (item.text || '').trim(), sentences: item.sentences };
+      V.lines = linesFromRich(item.sentences);       // 开播前即显示卡片＋全文
+      V.simple = false;
+      V.simpleNote = false;
+      showReader();
+      Vue.nextTick(function () { reader.scrollTop = 0; });
+    } else {
+      RICH = null;                                    // SQLite 兜底的旧文等：简易模式
+      V.lines = [];
+      V.simple = true;
+      V.simpleNote = true;
+      if (readingView) showEditor(false);
+    }
+  }
+
+  // ---------------- P4b 选文：面板开合、列表加载、页内切换 ----------------
+  var pickReqSeq = 0, switchSeq = 0;
+
+  function loadArticles() {
+    var my = ++pickReqSeq;
+    if (V.pickState !== 'ok') V.pickState = 'loading';   // 已有列表时后台刷新，不闪“加载中”
+    V.pickErr = '';
+    return fetch('/v3/articles', { cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (d) {
+        if (my !== pickReqSeq) return;
+        V.articles = (d && Array.isArray(d.articles)) ? d.articles : [];
+        V.pickState = 'ok';
+      })
+      .catch(function (e) {
+        if (my !== pickReqSeq) return;
+        V.pickErr = (e && e.message) || '网络错误';
+        V.pickState = 'error';                            // 只影响面板；当前文章与播放照常
+      });
+  }
+
+  function focusPickTarget() {
+    if (!V.pickOpen) return;
+    var el = document.querySelector('.pick-item.current') || document.querySelector('.pick-item') || pickClose;
+    if (el && isShown(el)) el.focus();
+  }
+
+  // 打开面板：不触碰 audio / 会话（播放继续）；面板原位占用卡片＋全文的位置，编辑框暂时收起
+  function openPicker(focusList) {
+    V.pickOpen = true;
+    textEl.hidden = true;
+    var p = loadArticles();
+    if (focusList) {
+      Vue.nextTick(focusPickTarget);
+      p.then(function () { Vue.nextTick(focusPickTarget); });
+    }
+  }
+
+  function closePicker(focusBtn) {
+    if (!V.pickOpen) return;
+    V.pickOpen = false;
+    textEl.hidden = readingView;                         // 编辑框可见性回到内核状态
+    if (focusBtn) Vue.nextTick(function () { pickBtn.focus(); });
+    lastScrolledIdx = -1;
+    Vue.nextTick(update);                                 // 卡片/全文重新显示后把当前句滚回可见
+  }
+
+  // 停掉当前播放会话（v2 没有独立的停会话函数；这里把 v2 换会话时分散执行的步骤合在一起：
+  // 停 m3u8 轮询、销毁 hls.js 实例、暂停并清空 audio 源；服务端 HLS 会话按现行规则自行清理）
+  function stopSession() {
+    if (S) clearTimeout(S.pollTimer);
+    S = null;
+    pendingRewind = false;
+    autoArmed = false;
+    pendingSeekIdx = -1;
+    if (hlsObj) { try { hlsObj.destroy(); } catch (e) {} hlsObj = null; }
+    try { audio.pause(); } catch (e) { /* 忽略 */ }
+    audio.removeAttribute('src');
+    try { audio.load(); } catch (e) { /* 忽略 */ }
+  }
+
+  // 选中一篇：先取数据，取到才停旧会话并切换（取不到则当前篇不受影响）
+  async function selectArticle(sid) {
+    if (!sid) return;
+    if (sid === V.currentId && S && sessionMatches()) { closePicker(true); return; }   // 点的是当前篇：只收起面板
+    var my = ++switchSeq;
+    var item = null;
+    try { item = await fetchShare(sid); } catch (e) { item = null; }
+    if (my !== switchSeq) return;                         // 期间又点了别的篇，以最后一次为准
+    if (!item) { V.pickErr = '这篇文章暂时取不到，当前文章照常播放'; return; }
+    stopSession();
+    closePicker(false);
+    applyItem(item, sid);
+    try { history.replaceState(null, '', location.pathname + '?s=' + encodeURIComponent(V.currentId)); } catch (e) { /* 忽略 */ }
+    refreshUI();
+    renderStatus(null);
+    Vue.nextTick(function () { btn.focus(); });
+    startReading(true);                                   // 同 ?s= 入口：尝试自动播放，被拦则静默，按播放键即可
+  }
+
+  (async function () {
+    var q = new URLSearchParams(location.search);
+    var changed = false;
+    if (q.get('s')) {
+      try {
+        var item = await fetchShare(q.get('s'));
+        if (item) {
+          applyItem(item, q.get('s'));
+          changed = true;
+        }
+      } catch (e) { /* 分享取不到就用页面默认文本 */ }
+    } else if (q.get('text')) {
+      textEl.value = q.get('text');
+      setSelect(langEl, q.get('lang'));
+      setSelect(rateEl, q.get('rate'));
+      V.simpleNote = true;
+      changed = true;
+    }
+    refreshUI();
+    if (changed) startReading(true);
+    else if (!q.get('s')) openPicker(true);              // 裸 /v3：直接展开选文面板，焦点落在第一篇
+  })();
+})();
+</script>
+</body>
+</html>

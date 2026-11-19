@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TTS 流式朗读</title>
+<style>
+  body { font-family: -apple-system, "Helvetica Neue", sans-serif; margin: 20px; background: #f7f5f0; color: #222; }
+  h1 { font-size: 20px; }
+  textarea { width: 100%; box-sizing: border-box; height: 260px; font-size: 16px; line-height: 1.6; padding: 10px; border-radius: 8px; border: 1px solid #ccc; }
+  .row { margin: 12px 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  select, button { font-size: 16px; padding: 8px 12px; border-radius: 8px; }
+  button { background: #2b6cb0; color: #fff; border: none; }
+  audio { width: 100%; margin-top: 10px; }
+  .note { color: #666; font-size: 13px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<h1>微软 TTS 流式朗读</h1>
+<textarea id="text">大丈夫ですか？
+水…
+起きれますか？
+スポーツ飲料も買ってきました。常温です。
+汗びっしょりです。着替えて布団に入ってください。
+クローゼット開けても構いませんか？
+着替える前に汗ふきましょう。
+アイスチョコとバニラ、どっちがいいですか？
+バニラ。
+薬も置いときますね。
+買い物代金…カバンの中の財布から持っていってください。
+勝手にとっていいんですか？
+森山さんは信用してるんで。あと、今日の分のお給料払うんで。
+分かりました。じゃあ手伝いが必要な時は声かけてください。
+すいません、起こしました？
+いえ。
+熱だいぶ下がったみたいです。体温計持ってくればよかった。
+それじゃあ帰りますね。
+時間の超過分は？
+いりませんよ。ご飯作っただけですし。</textarea>
+<div class="row">
+  <label>语言
+    <select id="lang">
+      <option value="ja" selected>日语（Nanami）</option>
+      <option value="zh">中文（晓晓）</option>
+      <option value="en">英语（Aria）</option>
+    </select>
+  </label>
+  <label>语速
+    <select id="rate">
+      <option value="-20%" selected>80%</option>
+      <option value="+0%">100%</option>
+      <option value="-40%">60%</option>
+    </select>
+  </label>
+  <button id="play">▶ 播放</button>
+</div>
+<audio id="player" controls preload="none"></audio>
+<p class="note">音频由微软 Edge TTS 实时合成，经这台电脑切成小段（HLS 流）边合成边播，不等整段生成完。文本可改，改完点播放即可。</p>
+<script>
+  var audio = document.getElementById('player');
+  var btn = document.getElementById('play');
+
+  async function startReading(quiet) {
+    var text = document.getElementById('text').value.trim();
+    if (!text) return;
+    btn.disabled = true;
+    btn.textContent = '准备中…';
+    try {
+      var resp = await fetch('/play', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          text: text,
+          lang: document.getElementById('lang').value,
+          rate: document.getElementById('rate').value
+        })
+      });
+      var data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || ('HTTP ' + resp.status));
+      audio.src = data.url;
+      await audio.play();
+    } catch (e) {
+      if (!quiet) alert('播放失败：' + e.message);
+    }
+    btn.disabled = false;
+    btn.textContent = '▶ 播放';
+  }
+
+  btn.addEventListener('click', function () { startReading(false); });
+
+  // 带参数打开：?text=<内容>&lang=ja&rate=-20% 或 ?s=<分享ID>
+  // 填好文本与选项后自动尝试播放；被浏览器拦下时点一下播放键即可。
+  (async function () {
+    var q = new URLSearchParams(location.search);
+    var changed = false;
+    if (q.get('s')) {
+      try {
+        var r = await fetch('/t/' + encodeURIComponent(q.get('s')));
+        if (r.ok) {
+          var item = await r.json();
+          document.getElementById('text').value = item.text || '';
+          if (item.lang) document.getElementById('lang').value = item.lang;
+          if (item.rate) document.getElementById('rate').value = item.rate;
+          changed = true;
+        }
+      } catch (e) { /* 分享取不到就用页面默认文本 */ }
+    } else if (q.get('text')) {
+      document.getElementById('text').value = q.get('text');
+      if (q.get('lang')) document.getElementById('lang').value = q.get('lang');
+      if (q.get('rate')) document.getElementById('rate').value = q.get('rate');
+      changed = true;
+    }
+    if (changed) startReading(true);
+  })();
+</script>
+</body>
+</html>
