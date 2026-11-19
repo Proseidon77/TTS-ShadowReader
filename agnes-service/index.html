@@ -1,0 +1,1324 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agnes AI 生成工具</title>
+<style>
+  :root { --fg:#1f2328; --muted:#6b7280; --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --accent:#2563eb; --err:#b42318; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#e6e8eb; --muted:#9aa3ae; --bg:#14161a; --card:#1d2026; --line:#2e333b; --accent:#5b8cff; --err:#ff7b72; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.55 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; color:var(--fg); background:var(--bg); }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 12px; }
+  .tabs { display:flex; gap:6px; margin-bottom: 12px; }
+  .tabs button { flex:1; padding: 10px; border:1px solid var(--line); background: var(--card); color: var(--fg); border-radius: 8px; font-size: 15px; cursor: pointer; }
+  .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  label { display:block; font-size: 13px; color: var(--muted); margin: 8px 0 4px; }
+  textarea, input, select { width:100%; padding: 9px 10px; border:1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); font: inherit; }
+  textarea { min-height: 96px; resize: vertical; }
+  .row { display:flex; gap: 10px; flex-wrap: wrap; }
+  .row > div { flex: 1 1 140px; }
+  .go { margin-top: 12px; width:100%; padding: 12px; font-size: 16px; border:0; border-radius: 8px; background: var(--accent); color:#fff; cursor:pointer; }
+  .go:disabled { opacity: .55; cursor: wait; }
+  .status { margin-top: 10px; font-size: 13px; color: var(--muted); min-height: 1.2em; }
+  .status.err { color: var(--err); white-space: pre-wrap; word-break: break-word; }
+  .out { margin-top: 10px; }
+  .out pre { white-space: pre-wrap; word-break: break-word; margin: 0; font: inherit; }
+  .out img, .out video { max-width: 100%; border-radius: 8px; display:block; }
+  .out a { color: var(--accent); word-break: break-all; font-size: 13px; }
+  details { margin-top: 8px; font-size: 13px; color: var(--muted); }
+  details pre { white-space: pre-wrap; }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .spin { display:inline-block; width: 12px; height: 12px; border:2px solid var(--line); border-top-color: var(--accent); border-radius:50%; animation: s 0.8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes s { to { transform: rotate(360deg); } }
+  .hidden { display:none !important; }
+  .topbar { display:flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .who { font-size: 13px; color: var(--muted); }
+  .who button { margin-left: 6px; padding: 4px 10px; border:1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); cursor:pointer; font-size: 13px; }
+  #login { max-width: 380px; margin: 24px auto; }
+  #login h2 { font-size: 17px; margin: 0 0 4px; }
+  /* account + admin (TASK5) */
+  main.wide { max-width: 1240px; }
+  h3 { font-size: 16px; margin: 14px 0 6px; }
+  h3:first-child { margin-top: 0; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .banner { padding: 9px 12px; border-radius: 8px; margin-bottom: 10px; font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+  .banner.err { background: rgba(180,35,24,.10); color: var(--err); border: 1px solid rgba(180,35,24,.35); }
+  .banner.ok { background: rgba(22,163,74,.10); color: #15803d; border: 1px solid rgba(22,163,74,.35); }
+  @media (prefers-color-scheme: dark) { .banner.ok { color: #4ade80; } }
+  .tablewrap { overflow-x: auto; }
+  table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.grid th, table.grid td { border-bottom: 1px solid var(--line); padding: 6px 6px; text-align: left; vertical-align: top; white-space: nowrap; }
+  table.grid th { color: var(--muted); font-weight: 600; }
+  table.grid td.wrap { white-space: normal; word-break: break-word; min-width: 220px; }
+  .btn { padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--fg); cursor: pointer; font-size: 13px; margin: 0 4px 4px 0; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.danger { border-color: var(--err); color: var(--err); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .tag { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 12px; border: 1px solid var(--line); }
+  .tag.bad { color: var(--err); border-color: var(--err); }
+  .ovr { color: var(--accent); font-weight: 600; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .check input { width: auto; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--fg); padding: 16px; width: min(420px, 92vw); }
+  dialog::backdrop { background: rgba(0,0,0,.4); }
+  .dlg-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
+#i-drop.over{outline:2px dashed #555;background:rgba(127,127,127,.08)}
+</style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <h1>Agnes AI 生成工具</h1>
+    <div class="who hidden" id="who"><span id="whoName"></span> <span id="quota" title=""></span><button id="logout" type="button">退出登录</button></div>
+  </div>
+  <div class="sub" id="health">正在检查服务状态…</div>
+
+  <!-- LOGIN -->
+  <form class="card hidden" id="login" autocomplete="on">
+    <h2>登录</h2>
+    <div class="sub">请使用管理员分配的账号登录后再生成内容。</div>
+    <label for="l-user">用户名</label>
+    <input id="l-user" name="username" autocomplete="username" required maxlength="32">
+    <label for="l-pass">密码</label>
+    <input id="l-pass" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+    <button class="go" id="l-go" type="submit">登录</button>
+    <div class="status" id="l-status"></div>
+  </form>
+
+  <div id="app" class="hidden">
+  <div class="tabs">
+    <button data-tab="text" class="on">文本</button>
+    <button data-tab="image">图片</button>
+    <button data-tab="video">视频</button>
+    <button data-tab="account">我的账户</button>
+    <!-- TASK6 phase 2「添加文章」(PHASE2-AUTH-DESIGN): shown when /api/auth/me reports reading_ingest=web, or
+         when the page was opened as /add. Cosmetic as well: POST /api/reading/ingest answers 403 otherwise. -->
+    <button data-tab="add" id="tabAdd" class="hidden">添加文章</button>
+    <!-- Shown only when /api/auth/me reports role=admin. Hiding is cosmetic: the real guard is the
+         server (every /api/admin/* route answers 403 to non-admins). -->
+    <button data-tab="admin" id="tabAdmin" class="hidden">管理</button>
+  </div>
+
+  <!-- TEXT -->
+  <section class="card" id="tab-text">
+    <label for="t-prompt">提示词</label>
+    <textarea id="t-prompt" placeholder="例如：用三句话介绍一下长城"></textarea>
+    <label for="t-system">系统提示（可选）</label>
+    <input id="t-system" placeholder="例如：你是一个简洁的中文助手">
+    <label for="t-model">模型</label>
+    <select id="t-model"></select>
+    <button class="go" id="t-go">生成文本</button>
+    <div class="status" id="t-status"></div>
+    <div class="out" id="t-out"></div>
+  </section>
+
+  <!-- IMAGE -->
+  <section class="card hidden" id="tab-image">
+    <label for="i-prompt">提示词</label>
+    <textarea id="i-prompt" placeholder="例如：雨后霓虹街道上的一只橘猫，电影感"></textarea>
+    <div class="row">
+      <div><label for="i-model">模型</label><select id="i-model"></select></div>
+      <div><label for="i-size">尺寸</label>
+        <select id="i-size"><option>1K</option><option>2K</option><option>3K</option><option>4K</option></select></div>
+      <div><label for="i-ratio">比例</label>
+        <select id="i-ratio"><option value="">默认 (1:1)</option><option>1:1</option><option>3:4</option><option>4:3</option><option>16:9</option><option>9:16</option><option>2:3</option><option>3:2</option><option>21:9</option></select></div>
+    </div>
+    <label for="i-ref">参考图（可选，图生图）：填 URL，或直接粘贴图片</label>
+    <input id="i-ref" placeholder="https://...">
+    <div id="i-drop" style="border:1.5px dashed #9a9a9a;border-radius:10px;padding:10px 12px;margin:8px 0;color:#666;font-size:14px">把图片粘贴到本页（Ctrl+V）、拖到这里，或 <button type="button" id="i-pick">选择文件</button><input type="file" id="i-file" accept="image/*" hidden></div>
+    <img id="i-preview" class="hidden" alt="参考图预览" style="max-width:220px;max-height:220px;border-radius:10px;display:block;margin:6px 0">
+    <button type="button" id="i-clear" class="hidden">清除粘贴的参考图</button>
+    <div class="meta" id="i-refsrc"></div>
+    <button class="go" id="i-go">生成图片</button>
+    <div class="status" id="i-status"></div>
+    <div class="out" id="i-out"></div>
+  </section>
+
+  <!-- VIDEO -->
+  <section class="card hidden" id="tab-video">
+    <label for="v-prompt">提示词</label>
+    <textarea id="v-prompt" placeholder="例如：夜晚森林里三只小猫吹着铜管乐器行进，镜头平稳后退"></textarea>
+    <div class="row">
+      <div><label for="v-model">模型</label><select id="v-model"></select></div>
+      <div><label for="v-seconds">时长（秒）</label>
+        <select id="v-seconds"><option>4</option><option selected>5</option><option>6</option><option>8</option><option>10</option><option>12</option></select></div>
+      <div><label for="v-size">清晰度</label>
+        <select id="v-size"><option>720P</option><option>1080P</option><option>1K</option><option>2K</option></select></div>
+      <div><label for="v-ar">画面比例</label>
+        <select id="v-ar"><option>16:9</option><option>9:16</option><option>1:1</option><option>4:3</option><option>3:4</option><option>21:9</option></select></div>
+    </div>
+    <label for="v-first">首帧图片 URL（可选，填写后为首帧控制模式）</label>
+    <input id="v-first" placeholder="https://...">
+    <button class="go" id="v-go">生成视频</button>
+    <div class="status" id="v-status"></div>
+    <div class="out" id="v-out"></div>
+  </section>
+
+  <!-- MY ACCOUNT (all logged-in users) -->
+  <section class="card hidden" id="tab-account">
+    <h3>我的账户</h3>
+    <div class="sub" id="acc-info"></div>
+    <form id="acc-form" autocomplete="off">
+      <h3>修改口令</h3>
+      <label for="acc-cur">当前口令</label>
+      <input id="acc-cur" type="password" autocomplete="current-password" maxlength="1024" required>
+      <label for="acc-new">新口令</label>
+      <input id="acc-new" type="password" autocomplete="new-password" maxlength="1024" required>
+      <label for="acc-new2">确认新口令</label>
+      <input id="acc-new2" type="password" autocomplete="new-password" maxlength="1024" required>
+      <label class="check"><input type="checkbox" id="acc-show"> 显示口令</label>
+      <div class="hint">口令规则：10 位以上；至少包含小写字母、大写字母、数字、其他字符中的两类；至少 4 个不同字符；不能包含用户名；不能是常见口令。修改后其他设备上的登录会失效。</div>
+      <button class="go" id="acc-go" type="submit">修改口令</button>
+      <div class="status" id="acc-status"></div>
+    </form>
+  </section>
+
+  <!-- ADD ARTICLE (TASK6 phase 2 web channel: same-origin JWT → POST /api/reading/ingest; the TtsWeb token
+       stays on the server). Bookmark /add to open this tab directly. -->
+  <section class="card hidden" id="tab-add">
+    <h3>添加文章（朗读）</h3>
+    <div class="sub">保存后立即得到短链（可先听原文），译文与读音在后台补齐。草稿自动保存在本机浏览器里。</div>
+    <form id="ad-form" autocomplete="off">
+      <label for="ad-title">标题（必填）</label>
+      <input id="ad-title" maxlength="120" required placeholder="例如：北海道の旅">
+      <label for="ad-lang">语言</label>
+      <select id="ad-lang"><option value="ja" selected>日语（ja）</option><option value="zh">中文（zh，只存原文）</option><option value="en">英语（en，只存原文）</option></select>
+      <label for="ad-text">原文 <span class="meta" id="ad-count">0 / 5000</span></label>
+      <textarea id="ad-text" maxlength="5000" style="min-height:220px" placeholder="粘贴原文（最多 5000 字）"></textarea>
+      <button class="go" id="ad-go" type="submit">保存</button>
+      <div class="status" id="ad-status"></div>
+    </form>
+    <div class="out" id="ad-out"></div>
+    <h3>最近保存</h3>
+    <div class="meta"><button class="btn" type="button" id="ad-reload">刷新</button></div>
+    <div id="ad-recent"></div>
+  </section>
+
+  <!-- ADMIN (rendered for admins only; see note on #tabAdmin) -->
+  <section class="card hidden" id="tab-admin">
+    <div class="banner err hidden" id="adm-err"></div>
+    <div class="banner ok hidden" id="adm-ok"></div>
+    <div class="topbar"><h3>用户管理</h3><button class="btn" id="adm-reload" type="button">刷新</button></div>
+    <div class="tablewrap">
+      <table class="grid">
+        <thead><tr><th>用户名</th><th>角色</th><th>状态</th><th>创建时间</th><th>最近登录</th>
+          <th title="生效值：每分钟 / 每日 / 视频每日 / 并发；* = 本账号单独设置（覆盖默认值）">限额（* = 单独设置）</th>
+          <th>今日用量</th><th title="POST /api/reading/ingest 权限（none / web / agent）与 agent 映射的 Muse 编号">朗读入库</th><th>操作</th></tr></thead>
+        <tbody id="adm-users"></tbody>
+      </table>
+    </div>
+
+    <h3>新建用户</h3>
+    <form id="adm-create" autocomplete="off">
+      <div class="row">
+        <div><label for="nu-name">用户名</label><input id="nu-name" maxlength="32" required placeholder="3–32 位字母、数字、_ . -"></div>
+        <div><label for="nu-pass">口令</label><input id="nu-pass" type="password" autocomplete="new-password" maxlength="1024" required></div>
+        <div><label for="nu-role">角色</label><select id="nu-role"><option value="user">普通用户</option><option value="admin">管理员</option></select></div>
+        <div><label for="nu-ingest">朗读入库</label><select id="nu-ingest"><option value="none">无（none）</option><option value="agent">agent 通道</option><option value="web">web（网页保存·添加文章）</option></select></div>
+        <div><label for="nu-muse">Muse 编号（agent 用）</label><input id="nu-muse" maxlength="4" placeholder="A001"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="nu-show"> 显示口令</label>
+      <div class="row">
+        <div><label for="nu-rate_per_minute">每分钟上限（可选）</label><input id="nu-rate_per_minute" type="number" min="0" max="1000000" step="1"></div>
+        <div><label for="nu-daily_quota">每日上限（可选）</label><input id="nu-daily_quota" type="number" min="0" max="1000000" step="1"></div>
+        <div><label for="nu-video_daily_quota">视频每日上限（可选）</label><input id="nu-video_daily_quota" type="number" min="0" max="1000000" step="1"></div>
+        <div><label for="nu-max_concurrent">并发上限（可选）</label><input id="nu-max_concurrent" type="number" min="0" max="1000000" step="1"></div>
+      </div>
+      <div class="hint">限额留空 = 使用系统默认值。口令规则同「我的账户」。A001 这类用户名保留给 Muse agent 编号，不能用作登录名。</div>
+      <button class="go" id="nu-go" type="submit">创建用户</button>
+    </form>
+
+    <h3>IP 封禁</h3>
+    <div class="tablewrap">
+      <table class="grid">
+        <thead><tr><th>IP</th><th>状态</th><th>锁定计数</th><th>更新时间</th><th>操作</th></tr></thead>
+        <tbody id="adm-ips"></tbody>
+      </table>
+    </div>
+
+    <h3>操作审计（最近 50 条）</h3>
+    <div class="tablewrap">
+      <table class="grid">
+        <thead><tr><th>时间</th><th>操作人</th><th>操作</th><th>对象</th><th>详情</th></tr></thead>
+        <tbody id="adm-audit"></tbody>
+      </table>
+    </div>
+
+    <h3>调用记录（生成调用，含被限额拒绝的）</h3>
+    <div class="row">
+      <div><label for="cl-user">账号</label><select id="cl-user"><option value="">全部账号</option></select></div>
+      <div><label for="cl-kind">类型</label><select id="cl-kind"><option value="">全部类型</option><option value="text">文本</option><option value="image">图片</option><option value="video">视频</option><option value="analyze">分析</option><option value="ingest">入库</option></select></div>
+      <div><label for="cl-limit">条数</label><select id="cl-limit"><option value="50">50</option><option value="100" selected>100</option><option value="200">200</option><option value="500">500</option></select></div>
+    </div>
+    <div class="tablewrap">
+      <table class="grid">
+        <thead><tr><th>时间</th><th>账号</th><th>类型</th><th>模型</th><th>结果</th><th>状态码</th><th>耗时</th><th>提示词摘要</th></tr></thead>
+        <tbody id="adm-calls"></tbody>
+      </table>
+    </div>
+
+    <!-- TASK6 phase 2: reading ingest jobs + L2 to-do list (admin view of /api/reading/jobs and /api/reading/l2) -->
+    <h3>朗读入库作业</h3>
+    <div class="row">
+      <div><label for="jb-status">状态</label><select id="jb-status"><option value="">全部状态</option><option value="queued">排队</option><option value="running">进行中</option><option value="retry">待重试</option><option value="done">完成</option><option value="l2">待 L2</option><option value="failed">失败</option><option value="cancelled">取消</option></select></div>
+      <div><label for="jb-channel">通道</label><select id="jb-channel"><option value="">全部通道</option><option value="agent">agent</option><option value="web">web</option></select></div>
+      <div><label for="jb-limit">条数</label><select id="jb-limit"><option value="50" selected>50</option><option value="100">100</option><option value="500">500</option></select></div>
+    </div>
+    <div class="tablewrap">
+      <table class="grid">
+        <thead><tr><th>创建</th><th>通道 / 入库人</th><th>短链</th><th>标题</th><th>状态</th><th>阶段</th><th>provider:model</th><th>结果</th></tr></thead>
+        <tbody id="jobs-tbody"></tbody>
+      </table>
+    </div>
+    <h3>L2 待办（执行者 agy-gemini；完成后自动对账关闭）</h3>
+    <div class="tablewrap">
+      <table class="grid">
+        <thead><tr><th>创建</th><th>短链</th><th>标题</th><th>通道 / 入库人</th><th>原因</th><th>基线版本</th><th>错误</th></tr></thead>
+        <tbody id="l2-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+  </div>
+</main>
+
+<!-- reset-password dialog -->
+<dialog id="dlg-reset">
+  <form id="rp-form" autocomplete="off">
+    <h3 id="rp-title">重置口令</h3>
+    <label for="rp-new">新口令</label>
+    <input id="rp-new" type="password" autocomplete="new-password" maxlength="1024" required>
+    <label for="rp-new2">确认新口令</label>
+    <input id="rp-new2" type="password" autocomplete="new-password" maxlength="1024" required>
+    <label class="check"><input type="checkbox" id="rp-show"> 显示口令</label>
+    <div class="hint">重置后该用户的所有现有会话立即失效，账号锁定也会解除。</div>
+    <div class="status" id="rp-status"></div>
+    <div class="dlg-actions"><button class="btn" type="button" id="rp-cancel">取消</button><button class="btn primary" type="submit" id="rp-go">重置口令</button></div>
+  </form>
+</dialog>
+
+<!-- edit role / limits dialog -->
+<dialog id="dlg-edit">
+  <form id="ed-form" autocomplete="off">
+    <h3 id="ed-title">编辑</h3>
+    <label for="ed-role">角色</label>
+    <select id="ed-role"><option value="user">普通用户</option><option value="admin">管理员</option></select>
+    <div class="hint" id="ed-role-note"></div>
+    <div class="row">
+      <div><label for="ed-rate_per_minute">每分钟上限</label><input id="ed-rate_per_minute" type="number" min="0" max="1000000" step="1"></div>
+      <div><label for="ed-daily_quota">每日上限</label><input id="ed-daily_quota" type="number" min="0" max="1000000" step="1"></div>
+    </div>
+    <div class="row">
+      <div><label for="ed-video_daily_quota">视频每日上限</label><input id="ed-video_daily_quota" type="number" min="0" max="1000000" step="1"></div>
+      <div><label for="ed-max_concurrent">并发上限</label><input id="ed-max_concurrent" type="number" min="0" max="1000000" step="1"></div>
+    </div>
+    <div class="hint">留空 = 恢复系统默认值（占位符显示默认值）。只提交有变化的项。</div>
+    <div class="row">
+      <div><label for="ed-ingest">朗读入库权限</label><select id="ed-ingest"><option value="none">无（none）</option><option value="agent">agent 通道</option><option value="web">web（网页保存·添加文章）</option></select></div>
+      <div><label for="ed-muse">Muse 编号（留空 = 无映射）</label><input id="ed-muse" maxlength="4" placeholder="A001"></div>
+    </div>
+    <div class="status" id="ed-status"></div>
+    <div class="dlg-actions"><button class="btn" type="button" id="ed-cancel">取消</button><button class="btn primary" type="submit" id="ed-go">保存</button></div>
+  </form>
+</dialog>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+
+  // ---- Auth state. The access token (JWT, ~30 min) lives only in memory, never in
+  // localStorage. The refresh token is an httpOnly cookie the page cannot read; on page
+  // load and on 401 we call /api/auth/refresh to get a new access token.
+  let accessToken = null, currentUser = null, refreshTimer = null, refreshing = null;
+  try { localStorage.removeItem("agnesToken"); } catch (e) { /* old version leftover */ }
+
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* non-JSON */ }
+    return { res, data };
+  }
+
+  function setSession(d) {
+    accessToken = d.access_token;
+    currentUser = d.user;
+    $("whoName").textContent = "已登录：" + d.user.username;
+    $("acc-info").textContent = "用户名：" + d.user.username + " · 角色：" + roleZh(d.user.role);
+    checkRole();
+    clearTimeout(refreshTimer);
+    // refresh proactively one minute before expiry (long video polls keep working)
+    const ms = Math.max(30, (d.expires_in || 1800) - 60) * 1000;
+    refreshTimer = setTimeout(() => { refreshSession().catch(() => {}); }, ms);
+  }
+
+  function clearSession() {
+    accessToken = null; currentUser = null; clearTimeout(refreshTimer);
+    setAdminVisible(false);
+    // 添加文章: drop this account's job list / result, keep the draft (title / text survive a 401 re-login)
+    setAddVisible(false); stopAddPoll();
+    ["ad-out", "ad-recent"].forEach((id) => $(id).replaceChildren());
+  }
+
+  function roleZh(r) { return r === "admin" ? "管理员" : "普通用户"; }
+
+  // The 「管理」 tab is rendered only when /api/auth/me says role=admin (the DB is the source of
+  // truth there). This is purely cosmetic: every /api/admin/* call is authorized by the server,
+  // which answers 403 for non-admins whatever the page shows. Raw fetch on purpose (no refresh
+  // retry), so a failure here can never loop through the refresh logic; on failure: hidden.
+  let roleSeq = 0;
+  async function checkRole() {
+    const seq = ++roleSeq, token = accessToken;
+    let admin = false, canAdd = false;
+    try {
+      const r = await fetch("/api/auth/me", { headers: { Authorization: "Bearer " + token }, credentials: "same-origin" });
+      if (r.ok) {
+        const d = await r.json();
+        admin = !!(d && d.user && d.user.role === "admin");
+        canAdd = !!(d && d.user && d.user.reading_ingest === "web");
+      }
+    } catch (e) { /* stay hidden */ }
+    if (seq === roleSeq && token === accessToken) { setAdminVisible(admin); setAddVisible(canAdd); }
+  }
+
+  // /add (bookmarkable「添加文章」entry, same page): open that tab right after login
+  const ADD_PATH = location.pathname === "/add";
+  function setAddVisible(on) {
+    $("tabAdd").classList.toggle("hidden", !(on || ADD_PATH));
+  }
+
+  function setAdminVisible(on) {
+    $("tabAdmin").classList.toggle("hidden", !on);
+    if (!on) {
+      // drop any other users' data from the DOM and leave the admin view
+      ["adm-users", "adm-ips", "adm-audit"].forEach((id) => $(id).replaceChildren());
+      if (!$("tab-admin").classList.contains("hidden")) selectTab("text");
+    }
+  }
+
+  // single-flight: concurrent 401s share one refresh request
+  function refreshSession() {
+    if (!refreshing) {
+      refreshing = (async () => {
+        try {
+          let { res, data } = await postJson("/api/auth/refresh");
+          if (res.status === 401 && data && data.code === "refresh_rotated") {
+            // another tab (e.g. 管理页 + /add) refreshed the same session a moment ago: its new cookie is
+            // already in the jar, so wait briefly and refresh again instead of logging out
+            await new Promise((r) => setTimeout(r, 1500));
+            ({ res, data } = await postJson("/api/auth/refresh"));
+          }
+          if (res.ok && data && data.access_token) { setSession(data); return true; }
+          clearSession();
+          return false;
+        } catch (e) { return false; }
+      })().finally(() => { refreshing = null; });
+    }
+    return refreshing;
+  }
+
+  let modelsLoaded = false;
+  function showApp() {
+    $("login").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    $("who").classList.remove("hidden");
+    if (!modelsLoaded) loadModels();
+    loadQuota();
+    if (ADD_PATH) { setAddVisible(true); selectTab("add"); }
+  }
+
+  function showLogin(msg) {
+    clearSession();
+    $("app").classList.add("hidden");
+    $("who").classList.add("hidden");
+    $("login").classList.remove("hidden");
+    const st = $("l-status");
+    st.textContent = msg || "";
+    st.classList.toggle("err", !!msg);
+    $("l-pass").value = "";
+    (($("l-user").value && $("l-pass")) || $("l-user")).focus();
+  }
+
+  const loginErrors = {
+    invalid_credentials: "用户名或密码错误",
+    locked: "密码错误次数过多，账号已被临时锁定",
+    ip_blocked: "此 IP 因多次登录失败已被封禁，请联系管理员",
+    ip_throttled: "此 IP 登录失败次数过多，请稍后再试",
+    disabled: "账号已被停用",
+    jwt_secret_missing: "服务端未配置 JWT_SECRET，暂时无法登录",
+    db_unavailable: "认证数据库不可用，请联系管理员",
+  };
+
+  $("login").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const username = $("l-user").value.trim(), password = $("l-pass").value;
+    if (!username || !password) return;
+    const btn = $("l-go"), st = $("l-status");
+    btn.disabled = true; st.classList.remove("err"); st.textContent = "正在登录…";
+    try {
+      const { res, data } = await postJson("/api/auth/login", { username, password });
+      if (res.ok && data && data.access_token) {
+        $("l-pass").value = ""; st.textContent = "";
+        setSession(data); showApp();
+      } else {
+        let msg = (data && loginErrors[data.code]) || (data && data.error) || ("HTTP " + res.status);
+        if (data && data.retry_after) msg += "（约 " + Math.ceil(data.retry_after / 60) + " 分钟后再试）";
+        st.textContent = msg; st.classList.add("err");
+      }
+    } catch (e) {
+      st.textContent = "网络错误：" + e.message; st.classList.add("err");
+    } finally { btn.disabled = false; }
+  });
+
+  $("logout").addEventListener("click", async () => {
+    try { await postJson("/api/auth/logout"); } catch (e) { /* ignore */ }
+    showLogin("已退出登录");
+  });
+
+  // Tabs
+  const TABS = ["text", "image", "video", "account", "add", "admin"];
+  function selectTab(name) {
+    document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x.dataset.tab === name));
+    TABS.forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== name));
+    document.querySelector("main").classList.toggle("wide", name === "admin");
+    if (name === "admin") loadAdmin();
+    if (name === "add") loadRecent();
+  }
+  document.querySelectorAll(".tabs button").forEach((b) => b.addEventListener("click", () => selectTab(b.dataset.tab)));
+
+  async function call(method, url, body, retried) {
+    let res;
+    const headers = { "Content-Type": "application/json" };
+    if (accessToken) headers["Authorization"] = "Bearer " + accessToken;
+    try {
+      res = await fetch(url, { method, headers, credentials: "same-origin",
+        body: body ? JSON.stringify(body) : undefined });
+    } catch (e) {
+      throw new Error("网络错误：" + e.message);
+    }
+    if (res.status === 401 && !retried) {
+      // access token missing/expired: try refresh once, then retry; else back to login
+      if (await refreshSession()) return call(method, url, body, true);
+      showLogin("登录已过期，请重新登录");
+      throw new Error("登录已过期，请重新登录");
+    }
+    let data = null;
+    try { data = await res.json(); } catch (e) { /* non-JSON */ }
+    if (res.status === 401) {
+      showLogin("登录已失效，请重新登录");
+      throw new Error("登录已失效，请重新登录");
+    }
+    if (res.status === 429 && data && limitCodes[data.code]) {
+      loadQuota();
+      throw new Error(limitMessage(data));
+    }
+    if (!res.ok) {
+      let msg = (data && data.error) || ("HTTP " + res.status);
+      if (data && data.upstream_status) msg += "\n上游状态：" + data.upstream_status;
+      if (data && data.upstream_body) msg += "\n上游返回：" + data.upstream_body;
+      const err = new Error(msg);
+      err.code = data && data.code; err.data = data || {}; err.status = res.status;
+      throw err;
+    }
+    return data;
+  }
+
+  // ---- Per-account limits (server returns 429 with error/code = rate_limited | daily_quota_exceeded | concurrency_limit)
+  const limitCodes = { rate_limited: 1, daily_quota_exceeded: 1, concurrency_limit: 1 };
+  function fmtTime(iso) {
+    try {
+      return new Date(iso).toLocaleString("zh-CN", { timeZone: "Asia/Tokyo", month: "numeric", day: "numeric",
+        hour: "2-digit", minute: "2-digit", hour12: false }) + "（日本时间）";
+    } catch (e) { return iso; }
+  }
+  function limitMessage(d) {
+    if (d.code === "daily_quota_exceeded") {
+      const what = d.scope === "video" ? "今日视频生成次数" : "今日生成次数";
+      return what + "已用完（上限 " + d.limit + " 次/天，剩余 " + d.remaining + "）。将于 " + fmtTime(d.reset_at) + " 重置。";
+    }
+    if (d.code === "rate_limited")
+      return "请求过于频繁：每分钟最多 " + d.limit + " 次生成，请约 " + (d.retry_after || 60) + " 秒后再试。";
+    if (d.scope === "global")
+      return "服务繁忙：同时进行的生成任务已达上限（" + d.limit + "），请稍后再试。";
+    return "同时进行的生成任务过多（本账号最多 " + d.limit + " 个），请等待当前任务完成后再试。";
+  }
+  async function loadQuota() {
+    if (!accessToken) return;
+    try {
+      const d = await call("GET", "/api/limits");
+      const u = d.usage, l = d.limits;
+      $("quota").textContent = "· 今日剩余 " + u.remaining.total + "/" + l.per_day + " 次（视频 " + u.remaining.video + "/" + l.video_per_day + "）";
+      $("quota").title = "每分钟最多 " + l.per_minute + " 次 · 同时最多 " + l.concurrent + " 个任务 · 每日 " + fmtTime(u.reset_at) + " 重置";
+    } catch (e) { $("quota").textContent = ""; }
+  }
+
+  function safeUrl(u) { return typeof u === "string" && /^https?:\/\//i.test(u) ? u : null; }
+
+  function busy(prefix, on, label) {
+    const btn = $(prefix + "-go"), st = $(prefix + "-status");
+    btn.disabled = on;
+    st.classList.remove("err");
+    if (!on) { clearInterval(btn._timer); loadQuota(); return; }
+    const t0 = Date.now();
+    const draw = () => {
+      const s = Math.floor((Date.now() - t0) / 1000);
+      st.innerHTML = "";
+      const sp = document.createElement("span"); sp.className = "spin";
+      st.append(sp, label + "… 已用时 " + s + " 秒");
+      if (btn._extra) st.append("（" + btn._extra + "）");
+    };
+    btn._extra = "";
+    draw();
+    btn._timer = setInterval(draw, 1000);
+  }
+
+  function fail(prefix, e) {
+    busy(prefix, false);
+    const st = $(prefix + "-status");
+    st.textContent = "出错了：" + e.message;
+    st.classList.add("err");
+  }
+
+  function fillSelect(sel, list, def) {
+    sel.innerHTML = "";
+    list.forEach((m) => { const o = document.createElement("option"); o.value = o.textContent = m; sel.append(o); });
+    if (def && list.includes(def)) sel.value = def;
+  }
+
+  // Health
+  fetch("/health").then((r) => r.json()).then((h) => {
+    const parts = ["服务正常"];
+    parts.push(h.key_configured ? "API 密钥已配置" : "⚠ 尚未配置 AGNES_API_KEY，暂时无法生成");
+    const a = h.auth || {};
+    if (a.jwt_secret && a.jwt_secret !== "ok") parts.push("⚠ 未配置 JWT_SECRET，无法登录");
+    else if (a.db && (!a.db.driver || !a.db.dsn_configured || a.db.reachable === false || a.db.schema_ready === false))
+      parts.push("⚠ 认证数据库未就绪");
+    $("health").textContent = parts.join(" · ");
+  }).catch(() => { $("health").textContent = "无法连接服务"; });
+
+  // Models (needs login)
+  async function loadModels() {
+    try {
+      const d = await call("GET", "/api/models");
+      fillSelect($("t-model"), d.models.text, d.defaults.text);
+      fillSelect($("i-model"), d.models.image, d.defaults.image);
+      fillSelect($("v-model"), d.models.video, d.defaults.video);
+      syncVideoSize();
+      modelsLoaded = true;
+    } catch (e) { /* call() already handled 401; other errors: selects stay empty */ }
+  }
+
+  // Start: try to resume the session from the refresh cookie
+  refreshSession().then((ok) => { if (ok) showApp(); else showLogin(""); });
+
+  // Flash video models only support 720P
+  function syncVideoSize() {
+    const flash = /-flash$/.test($("v-model").value);
+    if (flash) $("v-size").value = "720P";
+    $("v-size").disabled = flash;
+  }
+  $("v-model").addEventListener("change", syncVideoSize);
+
+  // TEXT
+  $("t-go").addEventListener("click", async () => {
+    const prompt = $("t-prompt").value.trim();
+    if (!prompt) return fail("t", new Error("请输入提示词"));
+    const out = $("t-out"); out.innerHTML = "";
+    busy("t", true, "正在生成文本");
+    try {
+      const d = await call("POST", "/api/text", { prompt, system: $("t-system").value.trim() || undefined, model: $("t-model").value });
+      busy("t", false);
+      $("t-status").textContent = "完成";
+      const pre = document.createElement("pre"); pre.textContent = d.text || "(空回复)"; out.append(pre);
+      if (d.reasoning) {
+        const det = document.createElement("details"); const sum = document.createElement("summary");
+        sum.textContent = "思考过程"; const rp = document.createElement("pre"); rp.textContent = d.reasoning;
+        det.append(sum, rp); out.append(det);
+      }
+      const meta = document.createElement("div"); meta.className = "meta";
+      meta.textContent = "模型：" + d.model + (d.usage ? " · tokens：" + (d.usage.prompt_tokens ?? "?") + " 输入 / " + (d.usage.completion_tokens ?? "?") + " 输出" : "");
+      out.append(meta);
+    } catch (e) { fail("t", e); }
+  });
+
+  // IMAGE
+  $("i-go").addEventListener("click", async () => {
+    const prompt = $("i-prompt").value.trim();
+    if (!prompt) return fail("i", new Error("请输入提示词"));
+    const out = $("i-out"); out.innerHTML = "";
+    busy("i", true, "正在生成图片（通常 10–60 秒，最长可能数分钟）");
+    try {
+      const body = { prompt, model: $("i-model").value, size: $("i-size").value };
+      if ($("i-ratio").value) body.ratio = $("i-ratio").value;
+      const refVal = iPasted || $("i-ref").value.trim();
+      if (refVal) body.image = refVal;
+      const d = await call("POST", "/api/image", body);
+      busy("i", false);
+      $("i-status").textContent = "完成";
+      const img = document.createElement("img"); img.alt = prompt;
+      const u = safeUrl(d.url);
+      if (u) img.src = u; else if (d.b64) img.src = "data:image/png;base64," + d.b64;
+      out.append(img);
+      if (u) { const a = document.createElement("a"); a.href = u; a.target = "_blank"; a.rel = "noopener"; a.textContent = "打开原图"; out.append(a); }
+      const meta = document.createElement("div"); meta.className = "meta";
+      meta.textContent = "模型：" + d.model + " · 尺寸：" + d.size + (d.ratio ? " · 比例：" + d.ratio : "");
+      out.append(meta);
+    } catch (e) { fail("i", e); }
+  });
+
+  // IMAGE reference: paste / drop / file -> data URL (the backend accepts data: URIs for image)
+  let iPasted = "";
+  const iShowRef = () => {
+    const pv = $("i-preview"), cl = $("i-clear"), src = $("i-refsrc");
+    if (iPasted) { pv.src = iPasted; pv.classList.remove("hidden"); cl.classList.remove("hidden"); src.textContent = "已设置粘贴的参考图（优先于 URL 输入框）"; }
+    else { pv.removeAttribute("src"); pv.classList.add("hidden"); cl.classList.add("hidden"); src.textContent = ""; }
+  };
+  const iSetFile = (file) => {
+    if (!file || !file.type || !file.type.startsWith("image/")) return;
+    if (file.size <= 4 * 1024 * 1024) { const r = new FileReader(); r.onload = () => { iPasted = r.result; iShowRef(); }; r.readAsDataURL(file); return; }
+    const img = new Image();
+    img.onload = () => { const max = 2048, k = Math.min(1, max / Math.max(img.width, img.height)); const c = document.createElement("canvas"); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k); c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(img.src); iPasted = c.toDataURL("image/jpeg", 0.9); iShowRef(); };
+    img.src = URL.createObjectURL(file);
+  };
+  document.addEventListener("paste", (e) => {
+    if ($("tab-image").classList.contains("hidden")) return;
+    const items = (e.clipboardData || {}).items || [];
+    for (let n = 0; n < items.length; n++) { if (items[n].type && items[n].type.startsWith("image/")) { e.preventDefault(); iSetFile(items[n].getAsFile()); break; } }
+  });
+  const dz = $("i-drop");
+  dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("over"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("over"));
+  dz.addEventListener("drop", (e) => { e.preventDefault(); dz.classList.remove("over"); iSetFile(e.dataTransfer.files && e.dataTransfer.files[0]); });
+  $("i-pick").addEventListener("click", () => $("i-file").click());
+  $("i-file").addEventListener("change", (e) => { iSetFile(e.target.files && e.target.files[0]); e.target.value = ""; });
+  $("i-clear").addEventListener("click", () => { iPasted = ""; iShowRef(); });
+
+  // VIDEO (async job: create, then poll status)
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const statusZh = { queued: "排队中", in_progress: "生成中", completed: "完成", failed: "失败" };
+  $("v-go").addEventListener("click", async () => {
+    const prompt = $("v-prompt").value.trim();
+    if (!prompt) return fail("v", new Error("请输入提示词"));
+    const out = $("v-out"); out.innerHTML = "";
+    const btn = $("v-go");
+    busy("v", true, "正在生成视频（通常 1–6 分钟）");
+    try {
+      const model = $("v-model").value;
+      const body = { prompt, model, seconds: $("v-seconds").value, size: $("v-size").value, aspect_ratio: $("v-ar").value };
+      if ($("v-first").value.trim()) body.first_frame = $("v-first").value.trim();
+      let job = await call("POST", "/api/video", body);
+      const id = job.id;
+      const deadline = Date.now() + 20 * 60 * 1000;
+      let errors = 0;
+      while (job.status !== "completed" && job.status !== "failed") {
+        btn._extra = (statusZh[job.status] || job.status) + (job.progress != null ? " " + job.progress + "%" : "") + " · 任务 " + id;
+        if (Date.now() > deadline) throw new Error("等待超时（20 分钟）。任务 ID：" + id);
+        await sleep(3000);
+        try {
+          job = await call("GET", "/api/video/status/" + encodeURIComponent(id) + "?model=" + encodeURIComponent(model));
+          errors = 0;
+        } catch (e) {
+          if (++errors >= 5) throw e;      // tolerate transient poll failures
+        }
+      }
+      if (job.status === "failed") throw new Error("视频生成失败：" + (job.error || "未知原因") + "（任务 " + id + "）");
+      busy("v", false);
+      $("v-status").textContent = "完成";
+      const u = safeUrl(job.url);
+      if (!u) throw new Error("任务完成但没有返回视频地址");
+      const v = document.createElement("video"); v.controls = true; v.playsInline = true; v.src = u; out.append(v);
+      const a = document.createElement("a"); a.href = u; a.target = "_blank"; a.rel = "noopener"; a.textContent = "下载 / 打开视频"; out.append(a);
+      const meta = document.createElement("div"); meta.className = "meta";
+      meta.textContent = "模型：" + model + " · " + (job.seconds || body.seconds) + " 秒 · " + (job.size || body.size) + " · 任务 " + id;
+      out.append(meta);
+    } catch (e) { fail("v", e); }
+  });
+
+  // ================================================================ account + admin (TASK5)
+  // Error codes from the admin / account API → Chinese text (server `error` is the fallback).
+  const adminErrors = {
+    invalid_username: "用户名需为 3–32 位字母、数字或 _ . -",
+    invalid_role: "角色无效（只能是普通用户或管理员）",
+    weak_password: "口令强度不足：",
+    missing_field: "缺少必填项：",
+    username_taken: "用户名已存在（不区分大小写）",
+    no_changes: "没有需要保存的修改",
+    cannot_modify_self: "不能修改自己的角色或状态、重置或删除自己的账户。修改自己的口令请到「我的账户」。",
+    last_admin: "这是最后一个启用的管理员，不能停用、降级或删除（至少要保留一个管理员）。",
+    invalid_limits: "限额必须是 0–1000000 的整数，留空表示系统默认值",
+    unknown_field: "请求包含未知字段：",
+    not_found: "对象不存在（可能已被删除），列表已刷新",
+    forbidden: "需要管理员权限",
+    invalid_ip: "IP 地址无效",
+    invalid_current_password: "当前口令不正确",
+    password_unchanged: "新口令不能与当前口令相同",
+    locked: "错误次数过多，账号已被临时锁定",
+    admin_unavailable: "管理数据表未就绪（需执行 auth_schema.sql）",
+    db_unavailable: "认证数据库不可用",
+    reserved_username: "A001 这类用户名保留给 Muse agent 编号，不能用作登录名",
+    invalid_reading_ingest: "朗读入库权限只能是 none / web / agent",
+    invalid_muse_id: "Muse 编号形如 A001",
+    muse_id_taken: "该 Muse 编号已映射到其他账号",
+  };
+  function errText(e) {
+    const m = e && e.code && adminErrors[e.code];
+    if (!m) return e.message;
+    if (e.code === "weak_password") return m + e.message;
+    if (e.code === "missing_field" || e.code === "unknown_field") return m + ((e.data && e.data.field) || "");
+    return m;
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return "—";
+    try {
+      return new Date(iso).toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit",
+        hour: "2-digit", minute: "2-digit", hour12: false });
+    } catch (e) { return iso; }
+  }
+  function el(tag, text, cls) {
+    const n = document.createElement(tag);
+    if (text != null) n.textContent = String(text);
+    if (cls) n.className = cls;
+    return n;
+  }
+  function btn(text, cls, onClick, disabledReason) {
+    const b = el("button", text, "btn" + (cls ? " " + cls : ""));
+    b.type = "button";
+    if (disabledReason) { b.disabled = true; b.title = disabledReason; }
+    else b.addEventListener("click", onClick);
+    return b;
+  }
+
+  // ---- banners (dbapi: error banner on top, success message names the affected user)
+  let okTimer = null;
+  function showErr(msg) {
+    $("adm-ok").classList.add("hidden");
+    $("adm-err").textContent = msg; $("adm-err").classList.remove("hidden");
+  }
+  function showOk(msg) {
+    $("adm-err").classList.add("hidden");
+    $("adm-ok").textContent = msg; $("adm-ok").classList.remove("hidden");
+    clearTimeout(okTimer);
+    okTimer = setTimeout(() => $("adm-ok").classList.add("hidden"), 8000);
+  }
+  function hideBanners() { $("adm-err").classList.add("hidden"); }
+
+  // ---- my account: change password (verifies the current one; re-issues tokens)
+  $("acc-show").addEventListener("change", () => {
+    ["acc-cur", "acc-new", "acc-new2"].forEach((id) => { $(id).type = $("acc-show").checked ? "text" : "password"; });
+  });
+  $("acc-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const st = $("acc-status"), go = $("acc-go");
+    st.classList.remove("err"); st.textContent = "";
+    const currentPassword = $("acc-cur").value, newPassword = $("acc-new").value;
+    if (newPassword !== $("acc-new2").value) { st.textContent = "两次输入的新口令不一致"; st.classList.add("err"); return; }
+    go.disabled = true; st.textContent = "正在修改…";
+    try {
+      const d = await call("POST", "/api/auth/change-password", { currentPassword, newPassword });
+      setSession(d);   // the old tokens are dead (token_version bumped); the response carries new ones
+      ["acc-cur", "acc-new", "acc-new2"].forEach((id) => { $(id).value = ""; });
+      st.textContent = "口令已修改。其他设备上的登录已失效，本页面已自动使用新的会话。";
+    } catch (e) {
+      st.textContent = errText(e); st.classList.add("err");
+    } finally { go.disabled = false; }
+  });
+
+  // ---- admin data
+  const LIMITS = [  // [override column, effective key, label]
+    ["rate_per_minute", "per_minute", "每分钟"], ["daily_quota", "per_day", "每日"],
+    ["video_daily_quota", "video_per_day", "视频/日"], ["max_concurrent", "concurrent", "并发"],
+  ];
+  let adminDefaults = null, adminLoading = null;
+  const actionZh = { create_user: "创建用户", update_user: "修改用户", reset_password: "重置口令",
+    delete_user: "删除用户", unblock_ip: "解除 IP 封禁", change_password: "修改自己的口令" };
+  const SELF_RESET = "不能在这里重置自己的口令，请到「我的账户」修改（需要验证当前口令）";
+  const SELF_CHANGE = "不能停用、降级或删除自己的账户（保证至少保留一个管理员）";
+
+  function loadAdmin() {
+    if (!adminLoading) {
+      adminLoading = (async () => {
+        try {
+          const [u, ips, audit] = await Promise.all([
+            call("GET", "/api/admin/users"), call("GET", "/api/admin/ip-blocks"), call("GET", "/api/admin/audit?limit=50"),
+          ]);
+          adminDefaults = u.defaults;
+          renderUsers(u.users); renderIps(ips.ip_blocks); renderAudit(audit.audit);
+          try { await loadCalls(); } catch (e2) { showErr("调用记录加载失败：" + errText(e2)); }
+          try { await loadJobs(); } catch (e3) { showErr("入库作业加载失败：" + errText(e3)); }
+        } catch (e) {
+          if (e.code === "forbidden") setAdminVisible(false);   // lost admin rights meanwhile
+          showErr("加载失败：" + errText(e));
+        }
+      })().finally(() => { adminLoading = null; });
+    }
+    return adminLoading;
+  }
+  $("adm-reload").addEventListener("click", () => { hideBanners(); loadAdmin(); });
+
+  // run an admin mutation: success → refresh table + message naming the user; failure → banner
+  async function mutate(fn, okMsg) {
+    try {
+      await fn();
+      await loadAdmin();
+      showOk(okMsg);
+      return true;
+    } catch (e) {
+      showErr(errText(e));
+      if (e.code === "not_found") loadAdmin();
+      return false;
+    }
+  }
+
+  const kindZh = { text: "文本", image: "图片", video: "视频", analyze: "分析", ingest: "入库" };
+  const outcomeZh = { success: "成功", upstream_rejected: "上游拒绝", rate_limited: "每分钟限额",
+    daily_quota_exceeded: "每日配额", concurrency_limit: "并发上限", limits_unavailable: "限额服务异常",
+    rejected: "被拒绝", error: "错误", accepted: "已受理", duplicate: "重复（已退额度）", upstream_throttled: "上游限流（已退额度）" };
+  async function loadCalls() {
+    const p = new URLSearchParams({ limit: $("cl-limit").value });
+    if ($("cl-user").value) p.set("user_id", $("cl-user").value);
+    if ($("cl-kind").value) p.set("kind", $("cl-kind").value);
+    const d = await call("GET", "/api/admin/calls?" + p.toString());
+    renderCalls(d.calls);
+  }
+  function renderCalls(list) {
+    const tb = $("adm-calls");
+    tb.replaceChildren();
+    if (!list.length) {
+      const tr = document.createElement("tr"); const td = el("td", "暂无记录"); td.colSpan = 8; tr.append(td); tb.append(tr);
+      return;
+    }
+    list.forEach((c) => {
+      const tr = document.createElement("tr");
+      tr.append(el("td", fmtDate(c.created_at)));
+      tr.append(el("td", c.username));
+      tr.append(el("td", kindZh[c.kind] || c.kind));
+      tr.append(el("td", c.model || "—"));
+      const otd = el("td", outcomeZh[c.outcome] || c.outcome);
+      if (c.detail) otd.title = c.detail;
+      const okish = c.outcome === "success" || c.outcome === "accepted" || c.outcome.startsWith("done:") || c.outcome.startsWith("retry:");
+      if (!okish) { otd.append(" "); otd.append(el("span", c.outcome.startsWith("l2:") ? "转 L2" : "失败", "tag bad")); }
+      tr.append(otd);
+      tr.append(el("td", String(c.http_status) + (c.upstream_status ? " / 上游 " + c.upstream_status : "")));
+      tr.append(el("td", c.duration_ms >= 1000 ? (c.duration_ms / 1000).toFixed(1) + "s" : c.duration_ms + "ms"));
+      const ptd = el("td", c.prompt_preview || ""); if (c.prompt_preview) ptd.title = c.prompt_preview;
+      tr.append(ptd);
+      tb.append(tr);
+    });
+  }
+  ["cl-user", "cl-kind", "cl-limit"].forEach((id) => $(id).addEventListener("change", () => { loadCalls().catch((e) => showErr(errText(e))); }));
+
+  // ---- TASK6 phase 2: ingest jobs + L2 list (text nodes only, never innerHTML)
+  const jobStatusZh = { queued: "排队", running: "进行中", retry: "待重试", done: "完成", l2: "待 L2", failed: "失败", cancelled: "取消" };
+  const l2Zh = { "api-down": "API 不可用", quota: "配额", quality: "质量", deadline: "超时" };
+  function emptyRow(tb, n, text) { const tr = el("tr"); const td = el("td", text); td.colSpan = n; tr.append(td); tb.append(tr); }
+  function shortLink(id) { return id ? "/v3?s=" + id : "—"; }
+  async function loadJobs() {
+    const p = new URLSearchParams({ limit: $("jb-limit").value });
+    if ($("jb-status").value) p.set("status", $("jb-status").value);
+    if ($("jb-channel").value) p.set("channel", $("jb-channel").value);
+    const [d, l2] = await Promise.all([call("GET", "/api/reading/jobs?" + p.toString()), call("GET", "/api/reading/l2")]);
+    const tb = $("jobs-tbody");
+    tb.replaceChildren();
+    if (!d.jobs.length) emptyRow(tb, 8, "暂无作业");
+    d.jobs.forEach((j) => {
+      const tr = el("tr");
+      tr.append(el("td", fmtDate(j.created_at)));
+      tr.append(el("td", j.channel + " / " + (j.added_by || "—")));
+      tr.append(el("td", shortLink(j.share_id)));
+      tr.append(el("td", j.title || "—"));
+      const st = el("td", jobStatusZh[j.status] || j.status);
+      if (j.status === "l2") { st.append(" "); st.append(el("span", l2Zh[j.l2_reason] || j.l2_reason || "", "tag bad")); }
+      if (j.status === "failed" || j.status === "cancelled") { st.append(" "); st.append(el("span", j.error_code || "", "tag bad")); }
+      if (j.status === "retry" && j.next_retry_at) st.title = "下次重试 " + fmtDate(j.next_retry_at) + "（" + (j.error_code || "") + "）";
+      tr.append(st);
+      tr.append(el("td", j.stage + (j.attempt ? "（重试 " + j.attempt + "）" : "")));
+      const pm = el("td", j.provider_model || "—"); if (j.trail) pm.title = j.trail;
+      tr.append(pm);
+      const r = j.result || {};
+      tr.append(el("td", [r.outcome, r.article_status && ("文章 " + r.article_status), r.version != null && ("v" + r.version), r.fx && ("fx=" + r.fx)].filter(Boolean).join(" · ") || "—"));
+      tb.append(tr);
+    });
+    const lb = $("l2-tbody");
+    lb.replaceChildren();
+    if (!l2.pending.length) emptyRow(lb, 7, "（无待办）" + (l2.reconciled_now ? "本次自动关闭 " + l2.reconciled_now + " 条" : ""));
+    l2.pending.forEach((x) => {
+      const tr = el("tr");
+      tr.append(el("td", fmtDate(x.created_at)));
+      tr.append(el("td", shortLink(x.share_id)));
+      tr.append(el("td", x.title || "—"));
+      tr.append(el("td", x.channel + " / " + (x.added_by || "—")));
+      tr.append(el("td", l2Zh[x.l2_reason] || x.l2_reason || "—"));
+      tr.append(el("td", x.base_version != null ? "v" + x.base_version : "—"));
+      const e = el("td", x.error_code || "—"); if (x.trail) e.title = x.trail;
+      tr.append(e);
+      lb.append(tr);
+    });
+  }
+  ["jb-status", "jb-channel", "jb-limit"].forEach((id) => $(id).addEventListener("change", () => { loadJobs().catch((e) => showErr(errText(e))); }));
+
+  // ---- TASK6 phase 2:「添加文章」(web channel). Same-origin JWT → POST /api/reading/ingest {title, text, lang};
+  // agnes-service shares the text with its own TtsWeb token. Every echo is a text node (textContent / el()).
+  const DRAFT_KEY = "agnesAddDraft";
+  const addErrors = {
+    ingest_forbidden: "此账号未开通保存文章（需要管理员把「朗读入库权限」设为 web）",
+    ingest_agent_unmapped: "agent 账号缺少 A00x 映射，请联系管理员",
+    title_required: "请填写标题",
+    invalid_text: "原文不能为空，且最多 5000 字",
+    invalid_lang: "语言只能是 ja / zh / en",
+    invalid_request: "请求格式不对",
+    unknown_field: "请求里有不允许的字段",
+  };
+  const addStageZh = { share: "存原文", preview: "分句", enrich: "翻译与读音", commit: "提交", done: "完成", "l2-pending": "待 L2", failed: "失败" };
+  function loadDraft() {
+    try {
+      const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || "null");
+      if (d && typeof d === "object") {
+        if (typeof d.title === "string") $("ad-title").value = d.title.slice(0, 120);
+        if (typeof d.text === "string") $("ad-text").value = d.text.slice(0, 5000);
+        if (d.lang === "ja" || d.lang === "zh" || d.lang === "en") $("ad-lang").value = d.lang;
+      }
+    } catch (e) { /* ignore a broken draft */ }
+    countAdd();
+  }
+  function saveDraft() {
+    try {
+      const title = $("ad-title").value, text = $("ad-text").value;
+      if (!title && !text) localStorage.removeItem(DRAFT_KEY);
+      else localStorage.setItem(DRAFT_KEY, JSON.stringify({ title, text, lang: $("ad-lang").value }));
+    } catch (e) { /* storage full / disabled: the form itself still holds the text */ }
+  }
+  function countAdd() {
+    const n = $("ad-text").value.length;
+    $("ad-count").textContent = n + " / 5000";
+    $("ad-count").style.color = n > 5000 ? "var(--err)" : "";
+  }
+  ["ad-title", "ad-text", "ad-lang"].forEach((id) => $(id).addEventListener("input", () => { countAdd(); saveDraft(); }));
+  loadDraft();
+
+  function linkNode(url) {
+    // absolute 8791 link when the server has TTSWEB_PUBLIC_URL; a relative /v3?s= would point at 8793 → text only
+    if (safeUrl(url)) {
+      const a = el("a", url); a.href = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      return a;
+    }
+    return el("span", url || "—");
+  }
+  function jobLine(j) {
+    const r = j.result || {};
+    const parts = [jobStatusZh[j.status] || j.status];
+    if (j.status !== "done" && j.stage) parts.push("阶段：" + (addStageZh[j.stage] || j.stage));
+    if (r.article_status) parts.push("文章 " + (r.article_status === "ready" ? "已完成（ready）" : r.article_status === "partial" ? "译文待补（partial）" : r.article_status));
+    if (j.status === "retry" && j.next_retry_at) parts.push("下次重试 " + fmtDate(j.next_retry_at));
+    if (j.status === "l2") parts.push("已转 L2 补译（" + (l2Zh[j.l2_reason] || j.l2_reason || "") + "），原文可先听");
+    if (j.error_code && (j.status === "failed" || j.status === "cancelled")) parts.push(j.error_code);
+    return parts.join(" · ");
+  }
+
+  let addPoll = null, addJobId = null;
+  function stopAddPoll() { clearTimeout(addPoll); addPoll = null; addJobId = null; }
+  function renderAddResult(j, note) {
+    const out = $("ad-out");
+    out.replaceChildren();
+    const box = el("div", null, "card");
+    const l1 = el("div"); l1.append(el("b", "短链："));
+    if (j.url) {
+      l1.append(linkNode(j.url), " ");
+      const cp = btn("复制", "", async () => {
+        try { await navigator.clipboard.writeText(j.url); cp.textContent = "已复制"; } catch (e) { cp.textContent = "复制失败"; }
+      });
+      l1.append(cp);
+    } else l1.append(el("span", "暂未拿到（TtsWeb 暂不可用，已收下原文，稍后自动入库）"));
+    box.append(l1);
+    box.append(el("div", (j.title || "") + "（" + j.lang + "）", "meta"));
+    box.append(el("div", "状态：" + jobLine(j), "meta"));
+    if (note) box.append(el("div", note, "meta"));
+    out.append(box);
+  }
+  const ADD_FINAL = { done: 1, failed: 1, cancelled: 1, l2: 1 };
+  function pollAddJob(id) {
+    stopAddPoll();
+    addJobId = id;
+    let n = 0;
+    const tick = async () => {
+      if (addJobId !== id) return;
+      try {
+        const d = await call("GET", "/api/reading/jobs/" + encodeURIComponent(id));
+        if (addJobId !== id) return;
+        renderAddResult(d.job);
+        // stop at a final state, at a scheduled retry (minutes away), or after ~10 min
+        if (ADD_FINAL[d.job.status] || d.job.status === "retry" || ++n > 150) { stopAddPoll(); loadRecent(); return; }
+      } catch (e) { if (addJobId !== id) return; }
+      addPoll = setTimeout(tick, 4000);
+    };
+    addPoll = setTimeout(tick, 2000);
+  }
+
+  $("ad-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const st = $("ad-status"), go = $("ad-go");
+    const title = $("ad-title").value.trim(), text = $("ad-text").value.trim(), lang = $("ad-lang").value;
+    st.classList.remove("err");
+    if (!title) { st.textContent = addErrors.title_required; st.classList.add("err"); return; }
+    if (!text) { st.textContent = "请粘贴原文"; st.classList.add("err"); return; }
+    if (text.length > 5000) { st.textContent = "原文超过 5000 字（现 " + text.length + " 字）"; st.classList.add("err"); return; }
+    saveDraft();
+    go.disabled = true; st.textContent = "正在保存…";
+    try {
+      const d = await call("POST", "/api/reading/ingest", { title, text, lang });
+      const job = d.job || {};
+      if (d.duplicate) {
+        st.textContent = "这篇文章已有进行中的作业，显示该作业";
+      } else {
+        st.textContent = d.share_id ? "已保存" : "已收下（TtsWeb 暂不可用，稍后自动入库）";
+      }
+      // success: the article (or its job) exists on the server → the local draft is no longer needed
+      $("ad-title").value = ""; $("ad-text").value = "";
+      try { localStorage.removeItem(DRAFT_KEY); } catch (e) { /* ignore */ }
+      countAdd();
+      if (job.id) { renderAddResult(job); if (!ADD_FINAL[job.status]) pollAddJob(job.id); }
+      loadRecent();
+    } catch (e) {
+      // 401 → call() already tried a refresh and showed the login box; the form and the draft are kept
+      st.textContent = (e.code && addErrors[e.code]) || e.message;
+      st.classList.add("err");
+    } finally { go.disabled = false; }
+  });
+
+  async function loadRecent() {
+    if (!accessToken) return;
+    const box = $("ad-recent");
+    try {
+      const d = await call("GET", "/api/reading/jobs?mine=1&channel=web&limit=10");
+      box.replaceChildren();
+      if (!d.jobs.length) { box.append(el("div", "还没有保存过文章", "meta")); return; }
+      d.jobs.forEach((j) => {
+        const row = el("div", null, "meta");
+        row.append(el("span", fmtDate(j.created_at) + " · "), el("b", j.title || "（无标题）"), el("span", " · "));
+        row.append(j.url ? linkNode(j.url) : el("span", "（短链待补）"));
+        row.append(el("span", " · " + jobLine(j)));
+        box.append(row);
+      });
+    } catch (e) {
+      box.replaceChildren(el("div", (e.code && addErrors[e.code]) || e.message, "meta"));
+    }
+  }
+  $("ad-reload").addEventListener("click", () => loadRecent());
+
+  function renderUsers(list) {
+    const csel = $("cl-user"); const curSel = csel.value;
+    csel.replaceChildren(new Option("全部账号", ""));
+    list.forEach((x) => csel.append(new Option(x.username, String(x.id))));
+    csel.value = curSel;
+    const tb = $("adm-users");
+    tb.replaceChildren();
+    list.forEach((u) => {
+      const self = !!currentUser && u.id === currentUser.id;
+      const tr = document.createElement("tr");
+      tr.append(el("td", u.username + (self ? "（我）" : "")));
+      tr.append(el("td", roleZh(u.role)));
+      const st = el("td");
+      if (!u.is_active) st.append(el("span", "已停用", "tag bad"));
+      else st.append(el("span", "启用", "tag"));
+      if (u.locked_until) { st.append(" "); st.append(el("span", "锁定至 " + fmtDate(u.locked_until), "tag bad")); }
+      tr.append(st);
+      tr.append(el("td", fmtDate(u.created_at)));
+      tr.append(el("td", fmtDate(u.last_login_at)));
+      const lim = el("td");
+      LIMITS.forEach(([col, key, label], i) => {
+        if (i) lim.append(" / ");
+        const over = u.limits[col] != null;
+        const s = el("span", u.effective_limits[key] + (over ? "*" : ""), over ? "ovr" : "");
+        s.title = label + (over ? "：单独设置" : "：系统默认");
+        lim.append(s);
+      });
+      tr.append(lim);
+      tr.append(el("td", u.usage_today.total + "/" + u.effective_limits.per_day +
+        "（视频 " + u.usage_today.video + "/" + u.effective_limits.video_per_day + "）"));
+      tr.append(el("td", (u.reading_ingest || "none") + (u.muse_id ? " · " + u.muse_id : "")));
+      const act = el("td");
+      act.append(btn(u.is_active ? "停用" : "启用", "", () => toggleActive(u), self ? SELF_CHANGE : null));
+      act.append(btn("编辑", "", () => openEdit(u)));
+      act.append(btn("重置口令", "", () => openReset(u), self ? SELF_RESET : null));
+      act.append(btn("删除", "danger", () => deleteUser(u), self ? SELF_CHANGE : null));
+      tr.append(act);
+      tb.append(tr);
+    });
+  }
+
+  function toggleActive(u) {
+    const on = !u.is_active;
+    if (!on && !confirm("确定停用用户 " + u.username + "？其现有会话会立即失效。")) return;
+    mutate(() => call("PATCH", "/api/admin/users/" + u.id, { is_active: on }),
+      on ? "已启用 " + u.username : "已停用 " + u.username + "（其现有会话已失效）");
+  }
+
+  function deleteUser(u) {
+    if (!confirm("确定删除用户 " + u.username + "？\n账号、会话和用量记录都会被删除，此操作不可撤销。")) return;
+    mutate(() => call("DELETE", "/api/admin/users/" + u.id), "已删除用户 " + u.username);
+  }
+
+  // ---- reset-password dialog (confirmation field + show/hide toggle)
+  let resetTarget = null;
+  function openReset(u) {
+    resetTarget = u;
+    $("rp-title").textContent = "重置 " + u.username + " 的口令";
+    $("rp-new").value = ""; $("rp-new2").value = ""; $("rp-show").checked = false;
+    $("rp-new").type = $("rp-new2").type = "password";
+    $("rp-status").textContent = ""; $("rp-status").classList.remove("err");
+    $("dlg-reset").showModal();
+    $("rp-new").focus();
+  }
+  $("rp-show").addEventListener("change", () => {
+    $("rp-new").type = $("rp-new2").type = $("rp-show").checked ? "text" : "password";
+  });
+  $("rp-cancel").addEventListener("click", () => $("dlg-reset").close());
+  $("dlg-reset").addEventListener("close", () => { $("rp-new").value = ""; $("rp-new2").value = ""; resetTarget = null; });
+  $("rp-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const u = resetTarget, st = $("rp-status");
+    if (!u) return;
+    st.classList.add("err");
+    if (!$("rp-new").value) { st.textContent = "请输入新口令"; return; }
+    if ($("rp-new").value !== $("rp-new2").value) { st.textContent = "两次输入的口令不一致"; return; }
+    $("rp-go").disabled = true;
+    try {
+      await call("POST", "/api/admin/users/" + u.id + "/reset-password", { newPassword: $("rp-new").value });
+      $("dlg-reset").close();
+      await loadAdmin();
+      showOk("已重置 " + u.username + " 的口令（其现有会话已失效）");
+    } catch (e) {
+      st.textContent = errText(e);   // stay in the dialog so the admin can fix the password
+    } finally { $("rp-go").disabled = false; }
+  });
+
+  // ---- edit dialog: role + the four limit overrides. Sends only what changed:
+  // empty field = null (clear override → system default), number = set override, unchanged = omitted.
+  let editTarget = null;
+  function openEdit(u) {
+    editTarget = u;
+    const self = !!currentUser && u.id === currentUser.id;
+    $("ed-title").textContent = "编辑 " + u.username;
+    $("ed-role").value = u.role;
+    $("ed-role").disabled = self;
+    $("ed-role-note").textContent = self ? "不能修改自己的角色。" : "";
+    LIMITS.forEach(([col, key]) => {
+      const inp = $("ed-" + col);
+      inp.value = u.limits[col] != null ? u.limits[col] : "";
+      inp.placeholder = adminDefaults ? "默认 " + adminDefaults[key] : "默认";
+    });
+    $("ed-ingest").value = u.reading_ingest || "none";
+    $("ed-muse").value = u.muse_id || "";
+    $("ed-status").textContent = ""; $("ed-status").classList.remove("err");
+    $("dlg-edit").showModal();
+  }
+  $("ed-cancel").addEventListener("click", () => $("dlg-edit").close());
+  $("ed-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const u = editTarget, st = $("ed-status");
+    if (!u) return;
+    st.classList.add("err");
+    const patch = {}, lim = {};
+    if (!$("ed-role").disabled && $("ed-role").value !== u.role) patch.role = $("ed-role").value;
+    for (const [col, , label] of LIMITS) {
+      const raw = $("ed-" + col).value.trim();
+      const v = raw === "" ? null : Number(raw);
+      if (v !== null && !(Number.isInteger(v) && v >= 0 && v <= 1000000)) {
+        st.textContent = label + "：请输入 0–1000000 的整数，或留空使用默认值"; return;
+      }
+      if (v !== u.limits[col]) lim[col] = v;
+    }
+    if (Object.keys(lim).length) patch.limits = lim;
+    if ($("ed-ingest").value !== (u.reading_ingest || "none")) patch.reading_ingest = $("ed-ingest").value;
+    const muse = $("ed-muse").value.trim().toUpperCase() || null;
+    if (muse !== null && !/^A\d{3}$/.test(muse)) { st.textContent = "Muse 编号形如 A001，或留空"; return; }
+    if (muse !== (u.muse_id || null)) patch.muse_id = muse;
+    if (!Object.keys(patch).length) { st.textContent = "没有需要保存的修改"; return; }
+    $("ed-go").disabled = true;
+    try {
+      await call("PATCH", "/api/admin/users/" + u.id, patch);
+      $("dlg-edit").close();
+      await loadAdmin();
+      showOk("已更新 " + u.username + " 的设置" + (patch.role ? "（角色已改为" + roleZh(patch.role) + "）" : ""));
+    } catch (e) {
+      st.textContent = errText(e);
+    } finally { $("ed-go").disabled = false; }
+  });
+
+  // ---- create user
+  $("nu-show").addEventListener("change", () => { $("nu-pass").type = $("nu-show").checked ? "text" : "password"; });
+  $("adm-create").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const username = $("nu-name").value.trim();
+    const body = { username, password: $("nu-pass").value, role: $("nu-role").value };
+    const lim = {};
+    for (const [col, , label] of LIMITS) {
+      const raw = $("nu-" + col).value.trim();
+      if (raw === "") continue;   // omitted = system default
+      const v = Number(raw);
+      if (!(Number.isInteger(v) && v >= 0 && v <= 1000000)) { showErr(label + "：请输入 0–1000000 的整数，或留空使用默认值"); return; }
+      lim[col] = v;
+    }
+    if (Object.keys(lim).length) body.limits = lim;
+    if ($("nu-ingest").value !== "none") body.reading_ingest = $("nu-ingest").value;
+    const nmuse = $("nu-muse").value.trim().toUpperCase();
+    if (nmuse) {
+      if (!/^A\d{3}$/.test(nmuse)) { showErr("Muse 编号形如 A001，或留空"); return; }
+      body.muse_id = nmuse;
+    }
+    $("nu-go").disabled = true;
+    const ok = await mutate(() => call("POST", "/api/admin/users", body),
+      "已创建用户 " + username + "（" + roleZh(body.role) + "）");
+    $("nu-go").disabled = false;
+    if (ok) {
+      $("nu-name").value = ""; $("nu-pass").value = ""; $("nu-role").value = "user"; $("nu-ingest").value = "none"; $("nu-muse").value = "";
+      LIMITS.forEach(([col]) => { $("nu-" + col).value = ""; });
+    }
+  });
+
+  // ---- IP blocks
+  function renderIps(list) {
+    const tb = $("adm-ips");
+    tb.replaceChildren();
+    if (!list.length) { const tr = el("tr"); const td = el("td", "（无记录）"); td.colSpan = 5; tr.append(td); tb.append(tr); return; }
+    list.forEach((b) => {
+      const tr = el("tr");
+      tr.append(el("td", b.ip));
+      tr.append(el("td", b.blocked ? (b.blocked_until ? "封禁至 " + fmtDate(b.blocked_until) : "永久封禁") : "未封禁（仅计数）"));
+      tr.append(el("td", b.lockout_count));
+      tr.append(el("td", fmtDate(b.updated_at)));
+      const act = el("td");
+      act.append(btn(b.blocked ? "解除封禁" : "清除记录", "", () => {
+        if (!confirm("确定清除 IP " + b.ip + " 的封禁记录？")) return;
+        mutate(() => call("DELETE", "/api/admin/ip-blocks/" + encodeURIComponent(b.ip)), "已清除 IP " + b.ip + " 的封禁记录");
+      }));
+      tr.append(act);
+      tb.append(tr);
+    });
+  }
+
+  // ---- audit (admin-only on the server)
+  function renderAudit(list) {
+    const tb = $("adm-audit");
+    tb.replaceChildren();
+    if (!list.length) { const tr = el("tr"); const td = el("td", "（暂无记录）"); td.colSpan = 5; tr.append(td); tb.append(tr); return; }
+    list.forEach((a) => {
+      const tr = el("tr");
+      tr.append(el("td", fmtDate(a.created_at)));
+      tr.append(el("td", a.actor_username + (a.actor_ip ? " @" + a.actor_ip : "")));
+      tr.append(el("td", actionZh[a.action] || a.action));
+      tr.append(el("td", a.target_username || (a.detail && a.detail.ip) || "—"));
+      tr.append(el("td", JSON.stringify(a.detail || {}), "wrap"));
+      tb.append(tr);
+    });
+  }
+})();
+</script>
+</body>
+</html>

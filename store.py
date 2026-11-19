@@ -67,7 +67,7 @@ class Store:
         """/t/<id>：按 share_id 或 alt_ids 命中未删除文章，返回与现行完全一致的 dict；无则 None。"""
         def q(conn):
             return conn.execute(
-                "SELECT text, lang, rate, title, added_by, added_at FROM reading.articles "
+                "SELECT text, lang, rate, title, added_by, added_at, status FROM reading.articles "
                 "WHERE deleted_at IS NULL AND (share_id = %s OR %s = ANY(alt_ids)) "
                 "ORDER BY (share_id = %s) DESC LIMIT 1", (sid, sid, sid)).fetchone()
         row = self._run(q)
@@ -80,6 +80,14 @@ class Store:
             item["added_by"] = row[4]
         if row[5]:
             item["added_at"] = row[5].astimezone(JST).isoformat(timespec="seconds")
+        item["_status"] = row[6]
+        return item
+
+    def get_legacy_public(self, sid):
+        """/t/<id>：与第二期前完全一致（不带 status）。"""
+        item = self.get_legacy(sid)
+        if item is not None:
+            item.pop("_status", None)
         return item
 
     def get_with_sentences(self, sid):
@@ -87,6 +95,7 @@ class Store:
         legacy = self.get_legacy(sid)
         if legacy is None:
             return None
+        legacy["status"] = legacy.pop("_status", None)   # 第二期：/v3/t 带文章状态（partial → 页面标「译文待补」）
 
         def q(conn):
             return conn.execute(
@@ -105,19 +114,19 @@ class Store:
         return legacy
 
     def list_public(self, limit=500):
-        """P4b /v3/articles（加性、免令牌）：只回公开字段；只含未删除且 status=ready；入库时间倒序。
-        不回正文、译文、tokens。"""
+        """P4b /v3/articles（加性、免令牌）：只回公开字段；入库时间倒序。不回正文、译文、tokens。
+        第二期（§5）：纳入 partial（刚粘贴保存、译文待补的文章也能在选文列表里找到），带 status；raw 仍不列。"""
         def q(conn):
             return conn.execute(
                 "SELECT a.share_id, a.title, a.added_at, a.added_by, a.lang, "
                 "  (SELECT count(*) FROM reading.sentences s "
-                "    WHERE s.article_id = a.share_id AND s.version = a.current_version) AS sentences "
-                "FROM reading.articles a WHERE a.deleted_at IS NULL AND a.status = 'ready' "
+                "    WHERE s.article_id = a.share_id AND s.version = a.current_version) AS sentences, a.status "
+                "FROM reading.articles a WHERE a.deleted_at IS NULL AND a.status IN ('ready', 'partial') "
                 "ORDER BY a.added_at DESC LIMIT %s", (limit,)).fetchall()
-        cols = ("share_id", "title", "added_at", "added_by", "lang", "sentences")
+        cols = ("share_id", "title", "added_at", "added_by", "lang", "sentences", "status")
         return [self._jsonable(dict(zip(cols, r))) for r in self._run(q)]
 
-    ART_COLS = ("share_id", "alt_ids", "title", "lang", "rate", "added_by", "added_at", "status",
+    ART_COLS = ("share_id", "alt_ids", "title", "lang", "rate", "added_by", "added_via", "added_at", "status",
                 "current_version", "content_hash", "created_at", "updated_at")
 
     @staticmethod
@@ -178,8 +187,9 @@ class Store:
             has_tr = bool(s.get("tr"))
             rows.append((sid, version, s["seq"], s["para"], s["text"], s["char_start"], s["char_end"],
                          s["len_class"], s.get("tr"),
-                         tr_meta.get("tr_by") if has_tr else None, tr_meta.get("tr_via") if has_tr else None,
-                         tr_meta.get("tr_model") if has_tr else None, now if has_tr else None,
+                         tr_meta.get("tr_by") if has_tr else None,
+                         (s.get("tr_via") or tr_meta.get("tr_via")) if has_tr else None,
+                         (s.get("tr_model") or tr_meta.get("tr_model")) if has_tr else None, now if has_tr else None,
                          Jsonb(s["toks"]) if s["toks"] is not None else None, s["kana"], s["lemmas"],
                          Jsonb(s.get("fixes", []))))
         with conn.cursor() as cur:
@@ -205,9 +215,9 @@ class Store:
                         "version": hit[1], "status": hit[2]}
             sid = self._new_share_id(conn)
             conn.execute(
-                "INSERT INTO reading.articles (share_id, text, lang, rate, title, added_by, added_at, status, "
-                "current_version) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1)",
-                (sid, plan["text"], plan["lang"], plan["rate"], plan["title"], added_by,
+                "INSERT INTO reading.articles (share_id, text, lang, rate, title, added_by, added_via, added_at, status, "
+                "current_version) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,1)",
+                (sid, plan["text"], plan["lang"], plan["rate"], plan["title"], added_by, plan.get("added_via") or "agent",
                  dt.datetime.now(JST), plan["status"]))
             tool = dict(plan["tool"], kind="commit", caller=caller)
             self._insert_version(conn, sid, 1, tool, caller, plan, tr_meta)
@@ -260,13 +270,14 @@ class Store:
             conn.execute("SET CONSTRAINTS ALL DEFERRED")
             hit = self._find_live_by_hash(conn, plan["content_hash"])
             if hit:
+                meta["_duplicate"] = {"status": hit[2], "version": hit[1]}
                 return hit[0]
             sid = self._new_share_id(conn)
             conn.execute(
-                "INSERT INTO reading.articles (share_id, text, lang, rate, title, added_by, added_at, status, "
-                "current_version) VALUES (%s,%s,%s,%s,%s,%s,%s,'partial',1)",
+                "INSERT INTO reading.articles (share_id, text, lang, rate, title, added_by, added_via, added_at, status, "
+                "current_version) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'partial',1)",
                 (sid, plan["text"], meta["lang"], meta["rate"], meta.get("title"), meta.get("added_by"),
-                 dt.datetime.now(JST)))
+                 meta.get("added_via") or "legacy", dt.datetime.now(JST)))
             tool = dict(plan["tool"], caller=meta.get("caller"), token=bool(meta.get("caller")))
             self._insert_version(conn, sid, 1, tool, meta.get("caller") or "share", plan, {})
             return sid

@@ -1,0 +1,27 @@
+[Unit]
+Description=Agnes AI API wrapper service (text/image/video, JWT auth) + frontend on :8793
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user
+Group=user
+WorkingDirectory=/data/workspace/agnes-service
+# .env provides AGNES_API_KEY, JWT_SECRET, AGNES_DB_DSN (+ optional tuning).
+# Leading "-" = optional: the service still starts if .env is missing
+# (/health and / work; login returns 503 without JWT_SECRET/DB, generation 503 without key).
+EnvironmentFile=-/data/workspace/agnes-service/.env
+Environment=HOST=0.0.0.0
+Environment=PORT=8793
+Environment=PYTHONUNBUFFERED=1
+# install.sh rewrites this to .venv/bin/python if psycopg had to go into a venv
+ExecStart=/usr/bin/python3 /data/workspace/agnes-service/server.py
+Restart=on-failure
+RestartSec=3
+# Light hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

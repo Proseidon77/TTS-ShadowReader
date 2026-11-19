@@ -12,7 +12,12 @@ import tokenizer as T
 
 MAX_TEXT = 5000
 RATE_RE = re.compile(r"^[+-]\d+%$")
-TR_VIA = {"self", "claude-code", "agy-gemini", "human", "import", "provided"}
+# 第二期（DF-12 / P2R-12）：加 API 路出处 gemini-api / agnes-api；与 reading.sentences_tr_via_check 同步（只放宽不收紧）
+TR_VIA = {"self", "claude-code", "agy-gemini", "human", "import", "provided", "gemini-api", "agnes-api"}
+# 第二期（DF-2 / P2R-11）：入库通道；legacy 只由迁移回填与「不带令牌的旧 /share」产生，调用方不能显式传
+ADDED_VIA = {"agent", "web"}
+READINGS_CHECK_MAX = 200
+READINGS_CHECK_NBEST = 20
 LANGS = {"ja", "zh", "en"}
 KANA_RE = re.compile(r"[぀-ヿ]")
 NEEDS_READING_RE = re.compile(r"[㐀-鿿豈-﫿々〆ヶ0-9]")
@@ -101,12 +106,21 @@ def plan_commit(body):
     translation_text = body.get("translation_text")
     allow_partial = bool(body.get("allow_partial"))
     replace = bool(body.get("replace"))
+    added_via = check_added_via(body)
     items = body.get("sentences")
     if not isinstance(items, list) or not items:
         raise ApiError("BODY_INVALID", "sentences 必须是非空数组", "先调 preview 取分句", {"path": "sentences"})
+    item_meta = []
     for i, it in enumerate(items):
         if not isinstance(it, dict) or not isinstance(it.get("text"), str):
             raise ApiError("BODY_INVALID", "sentences[].text 必须是字符串", "", {"path": f"sentences[{i}].text"})
+        # 第二期：逐句出处（同一版本内各块可能由不同 provider 产出，逐句记 tr_via / tr_model；缺省用版本级值）
+        iv, im = it.get("tr_via"), it.get("tr_model")
+        if iv is not None and iv not in TR_VIA:
+            raise ApiError("BODY_INVALID", "sentences[].tr_via 取值非法", f"可选：{sorted(TR_VIA)}", {"path": f"sentences[{i}].tr_via"})
+        if im is not None and (not isinstance(im, str) or len(im) > 80):
+            raise ApiError("BODY_INVALID", "sentences[].tr_model 必须是 ≤80 字的字符串", "", {"path": f"sentences[{i}].tr_model"})
+        item_meta.append((iv, im))
     if translation_text is not None:
         if not isinstance(translation_text, str) or not translation_text.strip():
             raise ApiError("BODY_INVALID", "translation_text 必须是非空字符串", "", {"path": "translation_text"})
@@ -204,17 +218,86 @@ def plan_commit(body):
             warnings.append({"code": "TR_SUSPECT", "index": i, "message": "译文假名占比过高，疑似未翻译"})
 
     status = "ready" if (not missing_tr and readings_complete) else "partial"
-    for s, t in zip(sents, trs):
+    for s, t, (iv, im) in zip(sents, trs, item_meta):
         s["tr"] = t.strip() if t and t.strip() else None
         s.setdefault("fixes", [])
+        if iv:
+            s["tr_via"] = iv
+        if im:
+            s["tr_model"] = im
     tool = dict(T.tool_info(), executor=executor, model=tr_model, prompt_version=prompt_version)
     if translation_text is not None:
         tool["align"] = {"translation_chars": len(translation_text)}
     return {"text": text, "content_hash": sha256_hex(text), "title": title, "lang": lang, "rate": rate,
             "executor": executor, "tr_via": tr_via, "tr_model": tr_model, "prompt_version": prompt_version,
             "allow_partial": allow_partial, "replace": replace, "base_version": body.get("base_version"),
+            "added_via": added_via,
             "share_id": body.get("share_id"), "sentences": sents, "status": status, "tool": tool,
             "warnings": warnings}
+
+
+def check_added_via(body):
+    """/share 与 commit 的 added_via（agent|web）；缺省 None（由服务按令牌推断）。replace 不改它。"""
+    v = body.get("added_via")
+    if v is None or v == "":
+        return None
+    if v not in ADDED_VIA:
+        raise ApiError("BODY_INVALID", "added_via 只能是 agent 或 web", "缺省时服务端按令牌推断", {"path": "added_via"})
+    return v
+
+
+def readings_check(body):
+    """词典佐证（§2.3 第 2 层，P2R-9）：对每项的整句做 nbest（N≈20），收集与该 token 字符区间对齐的各路径读音
+    （片假名转平假名；只认单个节点恰好覆盖该 token 的路径，不拼多节点），再加上 s 单独分词的读音；r 在候选内即 supported。
+    入参 {items:[{sentence, tok, s, r}]}（tok 为 preview toks 下标）；返回 {ok, results:[{supported, candidates}]}。"""
+    items = body.get("items")
+    if not isinstance(items, list) or not items:
+        raise ApiError("BODY_INVALID", "items 必须是非空数组", "", {"path": "items"})
+    if len(items) > READINGS_CHECK_MAX:
+        raise ApiError("BODY_INVALID", f"items 最多 {READINGS_CHECK_MAX} 项", "分批调用", {"path": "items"})
+    tagger = T.tagger()
+    cache = {}
+    results = []
+    for i, it in enumerate(items):
+        path = f"items[{i}]"
+        if not isinstance(it, dict) or not isinstance(it.get("sentence"), str) or not isinstance(it.get("tok"), int) \
+                or not isinstance(it.get("s"), str) or not isinstance(it.get("r"), str):
+            raise ApiError("BODY_INVALID", "items 项需为 {sentence:str, tok:int, s:str, r:str}", "", {"path": path})
+        sent = T.normalize(it["sentence"])
+        if not sent or len(sent) > 1000:
+            raise ApiError("BODY_INVALID", "sentence 为空或超过 1000 字", "", {"path": path + ".sentence"})
+        r = T.kata2hira(it["r"])
+        if sent not in cache:
+            cache[sent] = (T.tokenize(sent), tagger.nbestToNodeList(sent, READINGS_CHECK_NBEST))
+        toks, paths = cache[sent]
+        ti = it["tok"]
+        if not (0 <= ti < len(toks)) or toks[ti]["s"] != it["s"]:
+            results.append({"supported": False, "candidates": [], "error": "TOKEN_MISMATCH"})
+            continue
+        start = sum(len(t["s"]) for t in toks[:ti])
+        end = start + len(it["s"])
+        cands = set()
+        for nodes in paths:
+            pos, seg = 0, []
+            for w in nodes:
+                pos += len(w.white_space)
+                a = pos
+                pos += len(w.surface)
+                if a >= start and pos <= end:
+                    seg.append((a, pos, w))
+            # 只认「一个节点恰好覆盖该 token」的路径（续跑收紧）：把 東京 拆成 東|京 再拼读音（ひがし+きょう）
+            # 会把错误改写也判成 supported，佐证就失去意义了
+            if len(seg) != 1 or seg[0][0] != start or seg[0][1] != end:
+                continue
+            kanas = [w.feature.kana for _, _, w in seg]
+            if any(k in (None, "*") for k in kanas):
+                continue
+            cands.add(T.kata2hira("".join(kanas)))
+        alone = tagger(it["s"])
+        if alone and all(w.feature.kana not in (None, "*") for w in alone):
+            cands.add(T.kata2hira("".join(w.feature.kana for w in alone)))
+        results.append({"supported": r in cands, "candidates": sorted(cands)})
+    return {"ok": True, "results": results}
 
 
 def plan_share(text):

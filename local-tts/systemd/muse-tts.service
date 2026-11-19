@@ -1,0 +1,14 @@
+[Unit]
+Description=Muse TTS streaming service (Microsoft Edge ReadAloud WSS)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/hatch/workspace/tts-test
+ExecStart=/home/hatch/workspace/tts-test/venv/bin/python /home/hatch/workspace/tts-test/tts_service.py
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

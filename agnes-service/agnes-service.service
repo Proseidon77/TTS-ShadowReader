@@ -1,0 +1,30 @@
+[Unit]
+Description=Agnes AI API wrapper service (.NET 10; text/image/video, JWT auth, per-account limits) + frontend on :8793
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=user
+Group=user
+WorkingDirectory=/data/workspace/agnes-service
+# .env provides AGNES_API_KEY, JWT_SECRET, AGNES_DB_CONNECTION (+ optional tuning / LIMITS_DEFAULT_*).
+# Leading "-" = optional: the service still starts if .env is missing
+# (/health and / work; login returns 503 without JWT_SECRET/DB, generation 503 without key).
+# The app also re-reads ./.env itself when it changes (e.g. AGNES_API_KEY added later).
+EnvironmentFile=-/data/workspace/agnes-service/.env
+Environment=HOST=0.0.0.0
+Environment=PORT=8793
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+Environment=DOTNET_NOLOGO=1
+ExecStart=/data/dotnet-sdk/dotnet /data/workspace/agnes-service/publish/AgnesService.dll
+Restart=on-failure
+RestartSec=3
+# Kestrel shuts down gracefully on SIGTERM; give in-flight generations a moment.
+TimeoutStopSec=20
+# Light hardening
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
