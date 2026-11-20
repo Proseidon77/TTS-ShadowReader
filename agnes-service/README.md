@@ -203,3 +203,12 @@ Frontend: a 管理 tab is shown only when /api/auth/me reports role=admin; users
 - 已知限制（P2R-19）：公网网关从回环转发，来访 IP 一律 127.0.0.1，他人连输错口令可把账号锁 15 分钟或触发全站登录节流（可用性问题，不泄露口令、不越权）；页面会显示剩余锁定时间。
 - 两个标签页（管理页 + `/add`）同时刷新会话时，`/api/auth/refresh` 对「10 秒宽限内的已轮换」返回 401 `refresh_rotated` 且**不清 Cookie**，页面 1.5 s 后再刷一次，互不登出。
 - 测试：`python3 tests/p2_stack.py build|start mock8795.env ingest_mock.env ingest_tune.env|selftest|accept2 [A..M]|accept1 mock`；对 TtsWeb 开发副本（`tts-redesign/impl/phase2`，:8796，库 agnes_p2dev）：`python3 tests/p2_stack.py ttsweb` 后叠加 `ingest_ttswebdev.env` 跑 `tests/p2_ttswebdev.py`。
+
+## 文章管理：删除 + 编辑（2026-11-20）
+
+实施报告 `DELETE-EDIT-REPORT.md`。代码 `src/ArticleService.cs`（端点）、`src/IngestService.cs`（`op=edit` 作业）、`src/TtsWebClient.cs`（List/Delete/Patch）；TtsWeb 侧 `DELETE` / `PATCH /api/v1/articles/{sid}`（写令牌）。
+
+- 端点（同源 JWT，不开 CORS）：`GET /api/reading/articles`（全部登录用户，含 `can_manage`）、`GET /api/reading/articles/{sid}`（含原文，编辑预填）、`DELETE /api/reading/articles/{sid}`（软删）、`PATCH /api/reading/articles/{sid}` `{title?, lang?, text?}`：原文未变 → 200 `mode=meta`（TtsWeb PATCH，不出新版本）；原文变了 → 202 `mode=job`（`ingest_jobs.op='edit'`，同一 share_id 出新版本、旧版本保留，非日文按 D8 只存原文；计一次 ingest 额度）。
+- 权限（接口强制，页面只照着显示按钮）：admin 全部；`reading_ingest=web` ↔ `added_by=web`；`reading_ingest=agent` ↔ `added_by=<自己的 muse_id>`；其余 403 `article_forbidden`。文章正在处理 → 409 `job_active`。删改都写 `admin_audit`（delete_article / update_article / edit_article）。
+- 页面：「添加文章」页签下的「文章管理」区。
+- 测试：`tests/de_ttswebdev.py`（TtsWeb 开发副本 `tts-redesign/impl/deledit`，:8796）、`tests/de_accept.py`（dev：8795+8796+Mock；`prod`：生产实测，一次性测试账号与测试文用完即删）。

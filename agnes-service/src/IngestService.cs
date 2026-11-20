@@ -262,12 +262,14 @@ public static class IngestStore
         int? BaseVersion, string? Title, string Lang, string? Rate, string? SourceText, string Stage, string Status,
         string? ProviderModel, JsonNode? Chunks, string? Trail, string? ErrorCode, string? L2Reason, int Attempt,
         int TAttempts, DateTime? TSince, DateTime? NextRetryAt, JsonObject? Result, long? CallLogId, DateTime? L2ClosedAt,
-        DateTime CreatedAt, DateTime UpdatedAt, DateTime? FinishedAt);
+        DateTime CreatedAt, DateTime UpdatedAt, DateTime? FinishedAt, string Op = "ingest");
 
+    // op (2026-11-20 delete/edit): 'ingest' = new article / share_id job; 'edit' = text edit of an existing article
+    // (source_text = the new normalized text, committed as a new version on the same share_id)
     private const string Cols =
         "id, user_id, username, channel, added_by, share_id, base_version, title, lang, rate, source_text, stage, status, " +
         "provider_model, chunks, trail, error_code, l2_reason, attempt, t_attempts, t_since, next_retry_at, result, call_log_id, " +
-        "l2_closed_at, created_at, updated_at, finished_at";
+        "l2_closed_at, created_at, updated_at, finished_at, op";
 
     private static Job Read(NpgsqlDataReader r)
     {
@@ -276,7 +278,7 @@ public static class IngestStore
         return new Job(r.GetGuid(0), r.GetInt64(1), r.GetString(2), r.GetString(3), S(4), S(5), r.IsDBNull(6) ? null : r.GetInt32(6),
             S(7), r.GetString(8), S(9), S(10), r.GetString(11), r.GetString(12), S(13), S(14) is { } cj ? JsonNode.Parse(cj) : null,
             S(15), S(16), S(17), r.GetInt32(18), r.GetInt32(19), T(20), T(21), S(22) is { } rj ? JsonNode.Parse(rj) as JsonObject : null,
-            r.IsDBNull(23) ? null : r.GetInt64(23), T(24), r.GetDateTime(25), r.GetDateTime(26), T(27));
+            r.IsDBNull(23) ? null : r.GetInt64(23), T(24), r.GetDateTime(25), r.GetDateTime(26), T(27), r.GetString(28));
     }
 
     private static async Task<List<Job>> Query(string sql, CancellationToken ct, params object?[] args)
@@ -304,6 +306,32 @@ public static class IngestStore
         (await Query($"INSERT INTO agnes_auth.ingest_jobs (user_id, username, channel, added_by, share_id, title, lang, rate, source_text, " +
                      $"stage, status, call_log_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'queued', $11) RETURNING {Cols}", ct,
             u.Id, u.Username, channel, addedBy, shareId, title, lang, rate, text, shareId == null ? "share" : "preview", callLogId))[0];
+
+    /// <summary>Text edit of an existing article (op='edit'): share_id + new normalized text + the version it was based on.</summary>
+    public static async Task<Job> InsertEdit(AuthUser u, string channel, string? addedBy, string shareId, int baseVersion, string? title,
+        string lang, string? rate, string text, long? callLogId, CancellationToken ct) =>
+        (await Query($"INSERT INTO agnes_auth.ingest_jobs (user_id, username, channel, added_by, share_id, base_version, title, lang, rate, " +
+                     $"source_text, stage, status, call_log_id, op) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'preview', 'queued', $11, 'edit') " +
+                     $"RETURNING {Cols}", ct,
+            u.Id, u.Username, channel, addedBy, shareId, baseVersion, title, lang, rate, text, callLogId))[0];
+
+    /// <summary>Article was deleted: close the pending (queued / retry / L2) jobs of that share_id. Running jobs end on their own (410 → cancelled).</summary>
+    public static Task<int> CancelForShare(string shareId, CancellationToken ct) =>
+        Exec("UPDATE agnes_auth.ingest_jobs SET status = 'cancelled', stage = 'done', error_code = 'article_deleted', next_retry_at = NULL, " +
+             "source_text = NULL, finished_at = now(), expires_at = now() + make_interval(days => $2), updated_at = now() " +
+             "WHERE share_id = $1 AND status IN ('queued', 'retry', 'l2')", ct, shareId, IngestApi.KeepDays);
+
+    /// <summary>share_id → id of its active (queued / running / retry) job, for the article list.</summary>
+    public static async Task<Dictionary<string, (Guid id, string status, string op)>> ActiveByShares(CancellationToken ct)
+    {
+        await using var c = await Db.Open(ct);
+        await using var cmd = Db.Cmd(c, "SELECT share_id, id, status, op FROM agnes_auth.ingest_jobs WHERE share_id IS NOT NULL " +
+                                        "AND status IN ('queued','running','retry')", null);
+        await using var r = await cmd.ExecuteReaderAsync(ct);
+        var d = new Dictionary<string, (Guid, string, string)>();
+        while (await r.ReadAsync(ct)) d[r.GetString(0)] = (r.GetGuid(1), r.GetString(2), r.GetString(3));
+        return d;
+    }
 
     public static async Task<Job?> Get(Guid id, CancellationToken ct) =>
         (await Query($"SELECT {Cols} FROM agnes_auth.ingest_jobs WHERE id = $1", ct, id)).FirstOrDefault();
@@ -394,7 +422,7 @@ public static class IngestStore
 
     public static JsonObject View(Job j) => new()
     {
-        ["id"] = j.Id.ToString(), ["status"] = j.Status, ["stage"] = j.Stage, ["channel"] = j.Channel,
+        ["id"] = j.Id.ToString(), ["op"] = j.Op, ["status"] = j.Status, ["stage"] = j.Stage, ["channel"] = j.Channel,
         ["username"] = j.Username, ["added_by"] = j.AddedBy, ["share_id"] = j.ShareId,
         ["url"] = IngestApi.ShortUrl(j.ShareId), ["title"] = j.Title, ["lang"] = j.Lang,
         ["base_version"] = j.BaseVersion, ["provider_model"] = j.ProviderModel, ["chunks"] = j.Chunks?.DeepClone(),
@@ -638,19 +666,26 @@ public sealed class IngestWorker : BackgroundService
         var art = await TtsWebClient.GetArticle(shareId, stop);
         var status = (string?)art["status"];
         var curV = art["current_version"] is JsonValue cvv && cvv.TryGetValue<int>(out var cv) ? cv : 1;
-        if (status == "ready")
+        // op=edit (2026-11-20): the new text is not in TtsWeb yet → build the new version from job.SourceText (no
+        // "already ready" shortcut). Once a version with the new text exists (text-only / partial commit of an earlier
+        // attempt), the job continues exactly like a normal ingest job on the article text.
+        var isEdit = job.Op == "edit";
+        var editPending = isEdit && !string.IsNullOrEmpty(job.SourceText) && (string?)art["text"] != job.SourceText;
+        if (isEdit) cx.Notes.Add("op=edit");
+        if (status == "ready" && !editPending)
         {
             var other = job.BaseVersion != null && curV > job.BaseVersion;
             await End(cx, "done", "done", null, null, new JsonObject
             {
-                ["article_status"] = "ready", ["version"] = curV, ["outcome"] = other ? "done_by_other" : "already_ready",
+                ["article_status"] = "ready", ["version"] = curV,
+                ["outcome"] = isEdit ? "edit_done" : other ? "done_by_other" : "already_ready",
             });
             return;
         }
-        var text = (string?)art["text"] ?? job.SourceText ?? "";
-        var lang = (string?)art["lang"] ?? job.Lang;
+        var text = editPending ? job.SourceText! : (string?)art["text"] ?? job.SourceText ?? "";
+        var lang = isEdit ? job.Lang : (string?)art["lang"] ?? job.Lang;
         var rate = (string?)art["rate"] ?? job.Rate ?? "-20%";
-        var title = (string?)art["title"];
+        var title = isEdit && !string.IsNullOrWhiteSpace(job.Title) ? job.Title : (string?)art["title"];
         if (string.IsNullOrWhiteSpace(title)) title = job.Title;
         if (string.IsNullOrWhiteSpace(title)) { title = new string(text.Replace("\n", " ").Trim().Take(20).ToArray()); cx.Notes.Add("title=auto"); }
         await IngestStore.Progress(job.Id, "preview", curV, title);
@@ -658,9 +693,16 @@ public sealed class IngestWorker : BackgroundService
         // ---- D8: non-Japanese text stays as shared original (partial is final), no enrich
         if (lang != "ja" || KanaRatio(text) < KanaMinRatio)
         {
+            int? editV = null;
+            if (editPending)
+            {
+                var (st2, v2) = await CommitTextOnly(cx, shareId, curV, text, title!, lang, rate, stop);
+                if (v2 == null) return;   // job already ended / rescheduled by CommitTextOnly
+                (status, editV) = (st2, v2);
+            }
             await End(cx, "done", "done", null, null, new JsonObject
             {
-                ["article_status"] = status, ["version"] = curV, ["outcome"] = "non_ja", ["lang"] = lang,
+                ["article_status"] = status, ["version"] = editV ?? curV, ["outcome"] = isEdit ? "edit_non_ja" : "non_ja", ["lang"] = lang,
                 ["kana_ratio"] = Math.Round(KanaRatio(text), 3),
             });
             return;
@@ -699,6 +741,13 @@ public sealed class IngestWorker : BackgroundService
         var cands = Providers.Candidates(null, null, Providers.DefaultProvider, Providers.Order, Providers.Ready);
         if (cands.Count == 0)
         {
+            if (editPending)
+            {
+                // the edited text must land even when L1 cannot run: text-only version first, then retry / L2 on it
+                var (st2, v2) = await CommitTextOnly(cx, shareId, curV, text, title!, lang, rate, stop);
+                if (v2 == null) return;
+                (status, curV) = (st2, v2.Value);
+            }
             await NotReady(cx, "api-down", new JsonObject { ["article_status"] = status, ["version"] = curV, ["error"] = "no provider ready" }, null, "no_provider", null);
             return;
         }
@@ -715,6 +764,12 @@ public sealed class IngestWorker : BackgroundService
 
         if (o.Outs.Count == 0)
         {
+            if (editPending)
+            {
+                var (st2, v2) = await CommitTextOnly(cx, shareId, curV, text, title!, lang, rate, stop);
+                if (v2 == null) return;
+                (status, curV) = (st2, v2.Value);
+            }
             await NotReady(cx, L2ReasonOf(o, false), new JsonObject
             {
                 ["article_status"] = status, ["version"] = curV, ["failed_seqs"] = o.FailedSeqs.Count,
@@ -758,6 +813,11 @@ public sealed class IngestWorker : BackgroundService
         };
         JsonObject cres;
         try { cres = await TtsWebClient.Commit(body, stop); }
+        catch (TtsWebClient.TtsWebError e) when (editPending && e.Kind is "conflict" or "invalid")
+        {
+            await EditCommitRefused(cx, e, curV);
+            return;
+        }
         catch (TtsWebClient.TtsWebError e) when (e.Kind == "conflict")
         {
             // VERSION_CONFLICT: someone else (L2 / another executor) committed first — convergence, not failure
@@ -793,6 +853,58 @@ public sealed class IngestWorker : BackgroundService
         if (newV != null) await IngestStore.Progress(job.Id, "commit", newV);   // L2 / next retry builds on our partial version
         var readingsOnly = o.Complete;
         await NotReady(cx, L2ReasonOf(o, readingsOnly), result, mainKey, detail, trailStr);
+    }
+
+    /// <summary>
+    /// op=edit: commit the edited original as a new version without translations (D8 non-Japanese, or L1 could not
+    /// translate anything) so the edit lands and the short link plays the new text; later retries / L2 build on it.
+    /// Returns (article status, new version), or (null, null) when the job was ended / rescheduled here.
+    /// </summary>
+    private static async Task<(string? status, int? version)> CommitTextOnly(Ctx cx, string shareId, int baseV, string text,
+        string title, string lang, string rate, CancellationToken stop)
+    {
+        var pv = await TtsWebClient.Preview(text, lang, stop);
+        if (pv["sentences"] is not JsonArray ps || ps.Count == 0)
+            throw new TtsWebClient.TtsWebError("preview returned no sentences") { Kind = "invalid", Code = "preview_empty" };
+        var items = new JsonArray(ps.OfType<JsonObject>().Select(s => (JsonNode)new JsonObject { ["text"] = (string?)s["text"] }).ToArray());
+        var body = new JsonObject
+        {
+            ["replace"] = true, ["share_id"] = shareId, ["base_version"] = baseV,
+            ["text"] = (string?)pv["text"] ?? text, ["title"] = title, ["lang"] = lang, ["rate"] = rate,
+            // no sentence carries a translation, so tr_via is only the version-level label: the original was edited by a person
+            ["executor"] = "agnes-service", ["tr_via"] = "human", ["allow_partial"] = true, ["sentences"] = items,
+        };
+        try
+        {
+            var res = await TtsWebClient.Commit(body, stop);
+            var v = res["version"] is JsonValue nv && nv.TryGetValue<int>(out var nvi) ? nvi : (int?)null;
+            if (v != null) await IngestStore.Progress(cx.Job.Id, "preview", v);
+            cx.Notes.Add("edit=text-only");
+            return ((string?)res["status"], v);
+        }
+        catch (TtsWebClient.TtsWebError e) when (e.Kind is "conflict" or "invalid")
+        {
+            await EditCommitRefused(cx, e, baseV);
+            return (null, null);
+        }
+    }
+
+    /// <summary>
+    /// op=edit commit refused. VERSION_CONFLICT (someone committed in between): the edit is not lost — retry soon on the
+    /// newer version (T back-off; gives up after INGEST_T_MAX_S). Other 4xx (e.g. the new text equals another live
+    /// article): failed, the article keeps its old version — never L2, the L2 executor would work on the old text.
+    /// </summary>
+    private static async Task EditCommitRefused(Ctx cx, TtsWebClient.TtsWebError e, int baseV)
+    {
+        if (e.Kind == "conflict")
+        {
+            await IngestStore.Retry(cx.Job.Id, TNext(cx.Job), "preview", "version_conflict", true, 0, null, null);
+            await Interim(cx, "retry:version_conflict", e.Message);
+            return;
+        }
+        var dupOf = e.Body?["error"]?["details"]?["existing_share_id"]?.ToString();
+        await End(cx, "failed", "failed", dupOf != null ? "edit_duplicate_text" : "edit_commit_" + (e.Code ?? "invalid"), null,
+            new JsonObject { ["error"] = e.Message, ["base_version"] = baseV, ["existing_share_id"] = dupOf });
     }
 
     /// <summary>

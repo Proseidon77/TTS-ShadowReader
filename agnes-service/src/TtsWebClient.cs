@@ -91,6 +91,29 @@ public static class TtsWebClient
         return js["article"] as JsonObject ?? throw new TtsWebError("TtsWeb article response has no article") { Kind = "t", Code = "shape" };
     }
 
+    // ---- 2026-11-20 delete / edit (DELETE-EDIT-REPORT.md): article management for the「添加文章」page
+
+    /// <summary>GET /api/v1/articles (live articles, newest update first, ≤500; each with a `sentences` count).</summary>
+    public static async Task<JsonArray> ListArticles(CancellationToken ct)
+    {
+        var js = await Send(HttpMethod.Get, "/api/v1/articles", null, ct, 15);
+        return js["articles"] as JsonArray ?? throw new TtsWebError("TtsWeb article list has no articles") { Kind = "t", Code = "shape" };
+    }
+
+    /// <summary>DELETE /api/v1/articles/{id}: soft delete (deleted_at). 410 when already deleted (Kind gone).</summary>
+    public static Task<JsonObject> DeleteArticle(string id, CancellationToken ct) =>
+        Send(HttpMethod.Delete, "/api/v1/articles/" + Uri.EscapeDataString(id), null, ct, 15);
+
+    /// <summary>PATCH /api/v1/articles/{id} {title?, lang?}: metadata only, no new version.</summary>
+    public static async Task<JsonObject> PatchArticle(string id, string? title, string? lang, CancellationToken ct)
+    {
+        var body = new JsonObject();
+        if (title != null) body["title"] = title;
+        if (lang != null) body["lang"] = lang;
+        var js = await Send(HttpMethod.Patch, "/api/v1/articles/" + Uri.EscapeDataString(id), body, ct, 15);
+        return js["article"] as JsonObject ?? throw new TtsWebError("TtsWeb patch response has no article") { Kind = "t", Code = "shape" };
+    }
+
     public static Task<JsonObject> Preview(string text, string lang, CancellationToken ct) =>
         Send(HttpMethod.Post, "/api/v1/ingest/preview", new JsonObject { ["text"] = text, ["lang"] = lang }, ct);
 

@@ -20,7 +20,8 @@ ROOT = "/data/workspace/agnes-service"
 DOTNET = "/data/dotnet-sdk/dotnet"
 PROBE = ROOT + "/.probe"
 os.makedirs(PROBE, exist_ok=True)
-TTS_DIR = "/data/workspace/tts-redesign/impl/phase2"
+# dev TtsWeb copy; 2026-11-20 delete/edit work uses P2_TTS_DIR=/data/workspace/tts-redesign/impl/deledit
+TTS_DIR = os.environ.get("P2_TTS_DIR", "/data/workspace/tts-redesign/impl/deledit")
 TTS_PY = "/data/workspace/tts-web/venv/bin/python"
 
 

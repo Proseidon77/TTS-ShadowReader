@@ -246,6 +246,20 @@ CREATE INDEX IF NOT EXISTS ingest_jobs_status_idx ON agnes_auth.ingest_jobs (sta
 CREATE INDEX IF NOT EXISTS ingest_jobs_user_idx ON agnes_auth.ingest_jobs (user_id, created_at DESC);
 COMMENT ON TABLE agnes_auth.ingest_jobs IS 'Reading ingest jobs (POST /api/reading/ingest): share-first, L1 fallback, L2 hand-off marks';
 
+-- 2026-11-20 delete / edit (DELETE-EDIT-REPORT.md): text edits of an existing article run as ingest jobs too.
+-- op='edit': share_id + source_text (the new normalized original) + base_version → new version on the same share_id.
+-- Idempotent and additive (old code never reads the column; default keeps existing rows 'ingest').
+ALTER TABLE agnes_auth.ingest_jobs ADD COLUMN IF NOT EXISTS op text NOT NULL DEFAULT 'ingest';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'agnes_auth.ingest_jobs'::regclass
+                   AND conname = 'ingest_jobs_op_check') THEN
+        ALTER TABLE agnes_auth.ingest_jobs ADD CONSTRAINT ingest_jobs_op_check CHECK (op IN ('ingest', 'edit'));
+    END IF;
+END
+$$;
+COMMENT ON COLUMN agnes_auth.ingest_jobs.op IS 'ingest = new article / share_id job; edit = text edit of an existing article (new version, same share_id)';
+
 -- Optional least-privilege role: if a role named agnes_service exists (create it
 -- yourself, see README), give it exactly what the service needs on this schema.
 DO $$

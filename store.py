@@ -134,17 +134,64 @@ class Store:
         return {k: (v.astimezone(JST).isoformat(timespec="seconds") if isinstance(v, dt.datetime) else v)
                 for k, v in d.items()}
 
-    def list_articles(self, since=None, limit=500):
+    def list_articles(self, since=None, limit=500, include_deleted=False):
+        """GET /api/v1/articles。默认只列未删除文章（ddPC 预热按「整表 ready 列表」prune，删除即从列表消失）。
+        2026-11-20 删改：加性字段 sentences（当前版本句数）；include_deleted=1 且带 since 时另回墓碑行
+        {share_id, alt_ids, deleted:true, status:"deleted", deleted_at, updated_at}——只在显式要求时出现，
+        status 用非真实值 "deleted"，按 status=="ready" 过滤的旧消费方不会误收。"""
+        cols = ", ".join("a." + c for c in self.ART_COLS)
+        sent_count = ("(SELECT count(*) FROM reading.sentences s WHERE s.article_id = a.share_id "
+                      "AND s.version = a.current_version) AS sentences")
+
         def q(conn):
-            sql = f"SELECT {', '.join(self.ART_COLS)} FROM reading.articles WHERE deleted_at IS NULL"
+            sql = f"SELECT {cols}, {sent_count}, a.deleted_at FROM reading.articles a WHERE "
+            sql += "true" if (include_deleted and since) else "a.deleted_at IS NULL"
             args = []
             if since:
-                sql += " AND updated_at > %s"
+                sql += " AND a.updated_at > %s"
                 args.append(since)
-            sql += " ORDER BY updated_at DESC LIMIT %s"
+            sql += " ORDER BY a.updated_at DESC LIMIT %s"
             args.append(limit)
             return conn.execute(sql, args).fetchall()
-        return [self._jsonable(dict(zip(self.ART_COLS, r))) for r in self._run(q)]
+        out = []
+        for r in self._run(q):
+            d = dict(zip(self.ART_COLS + ("sentences", "deleted_at"), r))
+            if d.pop("deleted_at") is not None:
+                d = {"share_id": d["share_id"], "alt_ids": d["alt_ids"], "deleted": True, "status": "deleted",
+                     "deleted_at": r[-1], "updated_at": d["updated_at"]}
+            out.append(self._jsonable(d))
+        return out
+
+    def soft_delete(self, sid):
+        """删改（2026-11-20）：软删 = 置 deleted_at（同时 updated_at=now()，增量 feed 可见），不物理删、不动版本。
+        已删 → 410 NOT_FOUND；不存在 → 404。返回 {share_id, deleted_at}。"""
+        def tx(conn):
+            row = conn.execute("SELECT share_id, deleted_at FROM reading.articles WHERE share_id = %s OR %s = ANY(alt_ids) "
+                               "ORDER BY (share_id = %s) DESC LIMIT 1 FOR UPDATE", (sid, sid, sid)).fetchone()
+            if row is None:
+                raise ApiError("NOT_FOUND", "文章不存在", "检查短链 ID", {"id": sid})
+            if row[1] is not None:
+                raise ApiError("NOT_FOUND", "文章已删除", "", {"id": sid, "deleted_at": row[1].astimezone(JST).isoformat(timespec="seconds")},
+                               status=410)
+            at = conn.execute("UPDATE reading.articles SET deleted_at = now(), updated_at = now() WHERE share_id = %s "
+                              "RETURNING deleted_at", (row[0],)).fetchone()[0]
+            return {"share_id": row[0], "deleted_at": at}
+        return self._jsonable(self._run(tx))
+
+    def update_meta(self, sid, title=None, lang=None):
+        """删改（2026-11-20）：只改标题/语言；不动正文、句子与版本（current_version 不变）。返回更新后的元数据。"""
+        def tx(conn):
+            row = conn.execute("SELECT share_id, deleted_at FROM reading.articles WHERE share_id = %s OR %s = ANY(alt_ids) "
+                               "ORDER BY (share_id = %s) DESC LIMIT 1 FOR UPDATE", (sid, sid, sid)).fetchone()
+            if row is None:
+                raise ApiError("NOT_FOUND", "文章不存在", "检查短链 ID", {"id": sid})
+            if row[1] is not None:
+                raise ApiError("NOT_FOUND", "文章已删除", "", {"id": sid}, status=410)
+            r = conn.execute(f"UPDATE reading.articles SET title = coalesce(%s, title), lang = coalesce(%s, lang), "
+                             f"updated_at = now() WHERE share_id = %s RETURNING {', '.join(self.ART_COLS)}",
+                             (title, lang, row[0])).fetchone()
+            return dict(zip(self.ART_COLS, r))
+        return self._jsonable(self._run(tx))
 
     def get_article(self, sid):
         def q(conn):

@@ -702,12 +702,59 @@ async def handle_api_articles(request, who):
             since = _dt.datetime.fromisoformat(since)
         except ValueError:
             raise _ingest.ApiError("BODY_INVALID", "since 需为 ISO 时间", "", {"since": since}) from None
-    return web.json_response({"ok": True, "articles": await _in_thread(STORE.list_articles, since)})
+    # 2026-11-20 删改：include_deleted=1（须与 since 同用）另回墓碑行；缺省输出与之前相同（另加 sentences 句数字段）
+    include_deleted = request.query.get("include_deleted") in ("1", "true")
+    return web.json_response({"ok": True, "articles": await _in_thread(STORE.list_articles, since, 500, include_deleted)})
 
 
 @_api("read")
 async def handle_api_article(request, who):
     return web.json_response({"ok": True, "article": await _in_thread(STORE.get_article, request.match_info["sid"])})
+
+
+_SID_RE = re.compile(r"^[0-9a-f]{10}$")
+
+
+def _check_sid(sid):
+    if not _SID_RE.match(sid or ""):
+        raise _ingest.ApiError("NOT_FOUND", "文章不存在", "短链 ID 为 10 位十六进制", {"id": (sid or "")[:20]})
+    return sid
+
+
+@_api("write")
+async def handle_api_article_delete(request, who):
+    """DELETE /api/v1/articles/{sid}（2026-11-20 删改）：写令牌；软删（置 deleted_at），不物理删。
+    与 commit replace 同一鉴权口径（写令牌即可，不按 added_by 限制）；「谁能删哪篇」由调用方（agnes-service
+    按账号归属）把关。删后 /t、/v3/t → 404，/v3/articles 与 /api/v1/articles 不再列出；ddPC 下一轮预热 prune。"""
+    sid = _check_sid(request.match_info["sid"])
+    res = await _in_thread(STORE.soft_delete, sid)
+    log.info("article soft-deleted sid=%s caller=%s", res["share_id"], who[0])
+    return web.json_response({"ok": True, **res})
+
+
+@_api("write")
+async def handle_api_article_patch(request, who):
+    """PATCH /api/v1/articles/{sid}（2026-11-20 删改）：只改 title / lang；不动正文、句子与版本。
+    请求体只收 title、lang（至少一个），其他字段 BODY_INVALID。"""
+    sid = _check_sid(request.match_info["sid"])
+    body = await _api_body(request)
+    extra = sorted(k for k in body if k not in ("title", "lang"))
+    if extra:
+        raise _ingest.ApiError("BODY_INVALID", f"不支持的字段 {extra[0]}", "PATCH 只改 title / lang；改正文走 commit replace",
+                               {"path": extra[0]})
+    title = _ingest.need_str(body, "title", required=False, maxlen=120)
+    title = title.strip() if title else None
+    lang = body.get("lang")
+    if lang is not None:
+        if not isinstance(lang, str) or lang.lower() not in _ingest.LANGS:
+            raise _ingest.ApiError("BODY_INVALID", "lang 只能是 ja/zh/en", "", {"path": "lang"})
+        lang = lang.lower()
+    if title is None and lang is None:
+        raise _ingest.ApiError("BODY_INVALID", "至少提供 title 或 lang 之一", "", {"path": "title"})
+    art = await _in_thread(STORE.update_meta, sid, title, lang)
+    log.info("article meta updated sid=%s caller=%s fields=%s", art["share_id"], who[0],
+             ",".join(k for k, v in (("title", title), ("lang", lang)) if v is not None))
+    return web.json_response({"ok": True, "article": art})
 
 
 # ---------------- P4（加性）：/v3 播放页、Vue 静态文件、/v3/t/<id> 带句子的取文口 ----------------
@@ -841,6 +888,8 @@ def make_app():
     app.router.add_post("/api/v1/ingest/commit", handle_api_commit)
     app.router.add_get("/api/v1/articles", handle_api_articles)
     app.router.add_get("/api/v1/articles/{sid}", handle_api_article)
+    app.router.add_delete("/api/v1/articles/{sid}", handle_api_article_delete)
+    app.router.add_patch("/api/v1/articles/{sid}", handle_api_article_patch)
     app.router.add_post("/api/v1/ingest/readings_check", handle_api_readings_check)
     app.router.add_get("/ingest.md", _md_handler("ingest.md"))
     app.router.add_get("/ingest_prompt.md", _md_handler("ingest_prompt.md"))

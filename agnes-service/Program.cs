@@ -299,6 +299,9 @@ AdminApi.Map(app);
 // ---- TASK6 phase 2: reading ingest orchestration (POST /api/reading/ingest, jobs, L2 list); src/IngestService.cs
 IngestApi.Map(app);
 
+// ---- 2026-11-20 delete / edit: article management for the「添加文章」page (list / detail / delete / edit); src/ArticleService.cs
+ArticleApi.Map(app);
+
 app.MapFallback(ctx => Json.Write(ctx, 404, new JsonObject { ["error"] = "not found" }));
 
 var dbs = await Db.Status();
