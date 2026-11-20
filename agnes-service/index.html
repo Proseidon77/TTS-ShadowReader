@@ -43,7 +43,7 @@
   #login { max-width: 380px; margin: 24px auto; }
   #login h2 { font-size: 17px; margin: 0 0 4px; }
   /* account + admin (TASK5) */
-  main.wide { max-width: 1240px; }
+  main.wide { max-width: 1440px; }
   h3 { font-size: 16px; margin: 14px 0 6px; }
   h3:first-child { margin-top: 0; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
@@ -69,6 +69,29 @@
   dialog::backdrop { background: rgba(0,0,0,.4); }
   .dlg-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 12px; }
 #i-drop.over{outline:2px dashed #555;background:rgba(127,127,127,.08)}
+  /* 2026-11-20 UI fix: 文章管理 table — 操作 (delete only) first, fixed column widths, long cells ellipsised (full text in title=),
+     no horizontal scrollbar on desktop; narrow screens turn each row into a stacked card. */
+  #am-wrap { overflow-x: visible; }
+  table.am { table-layout: fixed; }
+  table.am th, table.am td { overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+  table.am td.wrap { white-space: nowrap; min-width: 0; }
+  table.am .c-ops { width: 72px; } table.am .c-st { width: 130px; } table.am .c-by { width: 160px; }
+  table.am .c-at { width: 140px; } table.am .c-n { width: 52px; text-align: right; } table.am .c-url { width: 170px; }
+  table.am td.c-ops { overflow: visible; }
+  table.am td.c-ops .btn { margin: 2px 4px 2px 0; }
+  table.am td a { color: var(--accent); }
+  /* fixed columns sum to 724px; below ~980px viewport the title column would get < ~180px, so switch to cards there */
+  @media (max-width: 980px) {
+    table.am, table.am tbody, table.am tr, table.am td { display: block; width: auto; }
+    table.am thead { display: none; }
+    table.am tr { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin-bottom: 8px; }
+    table.am td { border: 0; padding: 2px 0; text-align: left; }
+    table.am td.c-n { text-align: left; }
+    table.am td[data-label]::before { content: attr(data-label) "："; color: var(--muted); }
+    table.am td.c-title { white-space: normal; word-break: break-word; font-weight: 600; }
+    table.am td.c-title::before { content: none; }
+    table.am td.c-ops { padding-bottom: 4px; }
+  }
 </style>
 </head>
 <body>
@@ -199,32 +222,20 @@
     <div class="meta"><button class="btn" type="button" id="ad-reload">刷新</button></div>
     <div id="ad-recent"></div>
 
-    <!-- 2026-11-20 文章管理 (delete / edit): GET/DELETE/PATCH /api/reading/articles. Buttons follow the server's
-         can_manage flag (own channel; admins: all); hiding is cosmetic, the API answers 403 article_forbidden. -->
+    <!-- 2026-11-20 文章管理 (delete only; the edit UI was withdrawn 2026-11-20 — PATCH stays on the server, unused here):
+         GET/DELETE /api/reading/articles. The delete button follows the server's can_manage flag (own channel; admins: all);
+         hiding is cosmetic, the API answers 403 article_forbidden. -->
     <h3>文章管理</h3>
-    <div class="meta">列出全部文章；只能删改自己通道添加的文章（网页保存的 = web；agent 账号 = 自己的 A00x），管理员可删改全部。
+    <div class="meta">列出全部文章；只能删除自己通道添加的文章（网页保存的 = web；agent 账号 = 自己的 A00x），管理员可删除全部。
       <button class="btn" type="button" id="am-reload">刷新</button></div>
     <div class="status" id="am-status"></div>
-    <div class="tablewrap">
-      <table class="grid">
-        <thead><tr><th>标题</th><th>状态</th><th>添加者</th><th>添加时间</th><th>句数</th><th>短链</th><th>操作</th></tr></thead>
+    <div class="tablewrap" id="am-wrap">
+      <table class="grid am">
+        <colgroup><col class="c-ops"><col><col class="c-st"><col class="c-by"><col class="c-at"><col class="c-n"><col class="c-url"></colgroup>
+        <thead><tr><th class="c-ops">操作</th><th>标题</th><th class="c-st">状态</th><th class="c-by">添加者</th><th class="c-at">添加时间</th><th class="c-n">句数</th><th class="c-url">短链</th></tr></thead>
         <tbody id="am-list"></tbody>
       </table>
     </div>
-    <form id="am-form" class="card hidden" autocomplete="off" style="margin-top:10px">
-      <h3>编辑文章 <span class="meta" id="am-sid"></span></h3>
-      <label for="am-title">标题</label>
-      <input id="am-title" maxlength="120" required>
-      <label for="am-lang">语言</label>
-      <select id="am-lang"><option value="ja">日语（ja）</option><option value="zh">中文（zh，只存原文）</option><option value="en">英语（en，只存原文）</option></select>
-      <label for="am-text">原文 <span class="meta" id="am-count">0 / 5000</span></label>
-      <textarea id="am-text" maxlength="5000" style="min-height:220px"></textarea>
-      <div class="hint">只改标题或语言：立即生效，不产生新版本。改了原文：在同一短链上生成新版本（旧版本保留），译文与读音在后台补齐。</div>
-      <button class="go" id="am-go" type="submit">保存修改</button>
-      <button class="btn" id="am-cancel" type="button" style="margin-top:8px">取消</button>
-      <div class="status" id="am-fstatus"></div>
-    </form>
-    <div class="out" id="am-out"></div>
   </section>
 
   <!-- ADMIN (rendered for admins only; see note on #tabAdmin) -->
@@ -391,8 +402,8 @@
     // 添加文章: drop this account's job list / result, keep the draft (title / text survive a 401 re-login)
     setAddVisible(false); stopAddPoll();
     ["ad-out", "ad-recent"].forEach((id) => $(id).replaceChildren());
-    // 文章管理: drop the list, the open edit form (other account's prefill) and any edit-job poll
-    stopAmPoll(); closeEdit(); $("am-list").replaceChildren(); $("am-out").replaceChildren(); $("am-status").textContent = "";
+    // 文章管理: drop the list (other account's view)
+    $("am-list").replaceChildren(); $("am-status").textContent = "";
   }
 
   function roleZh(r) { return r === "admin" ? "管理员" : "普通用户"; }
@@ -515,7 +526,7 @@
   function selectTab(name) {
     document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x.dataset.tab === name));
     TABS.forEach((t) => $("tab-" + t).classList.toggle("hidden", t !== name));
-    document.querySelector("main").classList.toggle("wide", name === "admin");
+    document.querySelector("main").classList.toggle("wide", name === "admin" || name === "add");
     if (name === "admin") loadAdmin();
     if (name === "add") { loadRecent(); loadArticles(); }
   }
@@ -1140,19 +1151,13 @@
   }
   $("ad-reload").addEventListener("click", () => loadRecent());
 
-  // ---- 2026-11-20 文章管理: list (all logged-in users) + delete / edit (owner channel or admin; enforced by the server).
+  // ---- 2026-11-20 文章管理: list (all logged-in users) + delete (owner channel or admin; enforced by the server).
   // Same-origin JWT via call(); every echo is a text node (el() / textContent), never innerHTML.
   const amErrors = {
-    article_forbidden: "无权删改这篇文章（只能删改自己通道添加的文章；管理员可删改全部）",
-    job_active: "这篇文章正在后台处理，处理完成后再编辑",
+    article_forbidden: "无权删除这篇文章（只能删除自己通道添加的文章；管理员可删除全部）",
     not_found: "文章不存在或已删除，列表已刷新",
     ttsweb_unavailable: "朗读服务暂不可用，请稍后再试",
     ttsweb_auth_failed: "朗读服务拒绝了 agnes-service 的令牌，请联系管理员",
-    version_conflict: "文章刚被别人改过，请刷新后重试",
-    title_required: "标题不能为空",
-    invalid_text: "原文不能为空，且最多 5000 字",
-    invalid_lang: "语言只能是 ja / zh / en",
-    unknown_field: "请求里有不允许的字段",
     invalid_request: "请求格式不对",
   };
   const artStatusZh = { ready: "已完成", partial: "译文待补", raw: "仅原文" };
@@ -1175,20 +1180,37 @@
     tb.replaceChildren();
     list.forEach((a) => {
       const tr = document.createElement("tr");
-      tr.append(el("td", a.title || "（无标题）", "wrap"));
-      const st = el("td", artStatusZh[a.status] || a.status || "—");
-      if (a.active_job) { st.append(" "); st.append(el("span", (a.active_job.op === "edit" ? "编辑中 · " : "处理中 · ") + (jobStatusZh[a.active_job.status] || a.active_job.status), "tag")); }
-      tr.append(st);
-      tr.append(el("td", (a.added_by || "—") + (a.added_via ? "（" + a.added_via + "）" : "")));
-      tr.append(el("td", fmtDate(a.added_at)));
-      tr.append(el("td", a.sentences == null ? "—" : String(a.sentences)));
-      const lk = el("td"); lk.append(a.url ? linkNode(a.url) : el("span", "—")); tr.append(lk);
-      const ops = el("td");
+      // cell helper: class (column width), data-label (narrow-screen card label), title= full text for ellipsis
+      const cell = (text, cls, label) => {
+        const td = el("td", text, cls);
+        if (label) td.dataset.label = label;
+        if (text != null) td.title = String(text);
+        return td;
+      };
+      // 操作 first (row start), delete only. Same permission rule as before: no button unless the server says can_manage.
+      const ops = cell(null, "c-ops");
       if (a.can_manage) {
-        ops.append(btn("编辑", "", () => openEdit(a.share_id), a.active_job ? "后台处理中，完成后再编辑" : null));
         ops.append(btn("删除", "danger", () => deleteArticle(a)));
       } else ops.append(el("span", "—", "meta"));
       tr.append(ops);
+      tr.append(cell(a.title || "（无标题）", "c-title wrap"));
+      const st = cell(artStatusZh[a.status] || a.status || "—", "c-st", "状态");
+      if (a.active_job) {
+        const tag = (a.active_job.op === "edit" ? "编辑中 · " : "处理中 · ") + (jobStatusZh[a.active_job.status] || a.active_job.status);
+        st.append(" "); st.append(el("span", tag, "tag")); st.title += " " + tag;
+      }
+      tr.append(st);
+      tr.append(cell((a.added_by || "—") + (a.added_via ? "（" + a.added_via + "）" : ""), "c-by", "添加者"));
+      tr.append(cell(fmtDate(a.added_at), "c-at", "添加时间"));
+      tr.append(cell(a.sentences == null ? "—" : String(a.sentences), "c-n", "句数"));
+      // 短链: href unchanged; visible text shortened to path+query (the host is the same for every row), full URL on hover
+      const lk = cell(null, "c-url", "短链");
+      const ln = a.url ? linkNode(a.url) : el("span", "—");
+      if (a.url) {
+        ln.title = a.url;
+        if (ln.tagName === "A") { try { const u = new URL(a.url); ln.textContent = u.pathname.replace(/^\//, "") + u.search; } catch (e) { /* keep full text */ } }
+      }
+      lk.append(ln); tr.append(lk);
       tb.append(tr);
     });
   }
@@ -1200,100 +1222,11 @@
     try {
       await call("DELETE", "/api/reading/articles/" + encodeURIComponent(a.share_id));
       msg = "已删除「" + (a.title || a.share_id) + "」";
-      if (amEditSid === a.share_id) closeEdit();
     } catch (e) { msg = amErr(e); bad = true; }
     await loadArticles();
     amSay("am-status", msg, bad);
   }
 
-  let amEditSid = null, amOrig = null;
-  function amCount() {
-    const n = $("am-text").value.length;
-    $("am-count").textContent = n + " / 5000";
-    $("am-count").style.color = n > 5000 ? "var(--err)" : "";
-  }
-  $("am-text").addEventListener("input", amCount);
-  function closeEdit() {
-    amEditSid = null; amOrig = null;
-    $("am-form").classList.add("hidden");
-    amSay("am-fstatus", "");
-  }
-  $("am-cancel").addEventListener("click", closeEdit);
-  async function openEdit(sid) {
-    amSay("am-status", "正在读取原文…");
-    try {
-      const d = await call("GET", "/api/reading/articles/" + encodeURIComponent(sid));
-      const a = d.article;
-      amEditSid = a.share_id; amOrig = { title: a.title || "", lang: a.lang || "ja", text: a.text || "" };
-      $("am-sid").textContent = a.share_id + " · v" + a.current_version;
-      $("am-title").value = amOrig.title; $("am-lang").value = amOrig.lang; $("am-text").value = amOrig.text;
-      amCount();
-      amSay("am-fstatus", ""); amSay("am-status", "");
-      $("am-out").replaceChildren();
-      $("am-form").classList.remove("hidden");
-      $("am-form").scrollIntoView({ behavior: "smooth", block: "start" });
-    } catch (e) { amSay("am-status", amErr(e), true); if (e.code === "not_found") loadArticles(); }
-  }
-
-  let amPoll = null, amPollId = null;
-  function stopAmPoll() { clearTimeout(amPoll); amPoll = null; amPollId = null; }
-  function renderEditJob(j) {
-    const box = el("div", null, "card");
-    box.append(el("div", "编辑作业：" + (j.title || "") + "（" + j.lang + "）"));
-    box.append(el("div", "状态：" + jobLine(j), "meta"));
-    if (j.status === "failed" && j.error_code === "edit_duplicate_text") box.append(el("div", "新原文与另一篇已有文章相同，未修改", "meta"));
-    $("am-out").replaceChildren(box);
-  }
-  function pollEditJob(id) {
-    stopAmPoll();
-    amPollId = id;
-    let n = 0;
-    const tick = async () => {
-      if (amPollId !== id) return;
-      try {
-        const d = await call("GET", "/api/reading/jobs/" + encodeURIComponent(id));
-        if (amPollId !== id) return;
-        renderEditJob(d.job);
-        if (ADD_FINAL[d.job.status] || d.job.status === "retry" || ++n > 150) { stopAmPoll(); loadArticles(); return; }
-      } catch (e) { if (amPollId !== id) return; }
-      amPoll = setTimeout(tick, 4000);
-    };
-    amPoll = setTimeout(tick, 2000);
-  }
-
-  $("am-form").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    if (!amEditSid || !amOrig) return;
-    const title = $("am-title").value.trim(), lang = $("am-lang").value, text = $("am-text").value.trim();
-    if (!title) { amSay("am-fstatus", amErrors.title_required, true); return; }
-    if (!text) { amSay("am-fstatus", "原文不能为空", true); return; }
-    if (text.length > 5000) { amSay("am-fstatus", "原文超过 5000 字（现 " + text.length + " 字）", true); return; }
-    const body = {};
-    if (title !== amOrig.title) body.title = title;
-    if (lang !== amOrig.lang) body.lang = lang;
-    if (text !== amOrig.text.trim()) body.text = text;
-    if (!Object.keys(body).length) { amSay("am-fstatus", "没有改动"); return; }
-    const sid = amEditSid, go = $("am-go");
-    go.disabled = true; amSay("am-fstatus", "正在保存…");
-    try {
-      const d = await call("PATCH", "/api/reading/articles/" + encodeURIComponent(sid), body);
-      if (d.mode === "job") {
-        closeEdit();
-        amSay("am-status", "原文已提交：正在同一短链上生成新版本（旧版本保留）");
-        renderEditJob(d.job);
-        pollEditJob(d.job_id);
-      } else {
-        closeEdit();
-        amSay("am-status", d.mode === "noop" ? "没有改动" : "已保存（标题 / 语言已更新，未产生新版本）");
-      }
-      const keep = $("am-status").textContent;
-      await loadArticles();
-      amSay("am-status", keep);
-    } catch (e) {
-      amSay("am-fstatus", amErr(e), true);
-      if (e.code === "not_found") { closeEdit(); loadArticles(); }
-    } finally { go.disabled = false; }
-  });
   $("am-reload").addEventListener("click", () => loadArticles());
 
   function renderUsers(list) {
